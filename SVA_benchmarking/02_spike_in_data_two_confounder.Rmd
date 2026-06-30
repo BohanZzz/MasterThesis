@@ -1,0 +1,536 @@
+---
+title: "02_spike_in_data_real_data_only_Sex_confounder"
+output: html_document
+author: "Bohan Zhang"
+date: "2026-04-27"
+---
+
+```{r}
+library(edgeR)
+library(SummarizedExperiment)
+library(ggplot2)
+library(limma)
+library(sva)
+library(sechm)
+library(purrr)
+library(stringr)
+library(tibble)
+library(reshape2)
+library(dplyr)
+library(tidyr)
+library(iPSCpoweR)
+library(BiocParallel)
+library(ggnewscale)
+setwd("/mnt/gapp/work/bohan/thesis/SVA_exploration")
+```
+
+# function prepare
+
+```{r}
+source("function_for_spike_in_data_two_confounder.R")
+source("svacor_PL.R")
+source("proxy_function.R")
+```
+
+# data preparation
+
+```{r}
+data("GSE79636")
+se <- SummarizedExperiment(list(counts=GSE79636$dat), colData=GSE79636$annotation)
+se <- se[,se$race=="White"]  # keep Sex and insulin resistance as two confounders
+se <- se[rowSums(assay(se)>10)>1,]
+table(se$Sex, se$state)
+#          Insulin resistant Insulin sensitive
+#   Female                21                20
+#   Male                  25                 9
+se$confounders <- paste0(se$Sex, "_", ifelse(se$state == "Insulin resistant", "InsulRes", "InsulSens"))
+table(se$confounders)
+```
+
+# run in the loop
+
+```{r}
+# set multiple cores to make it faster
+seedset <- c(8, 12, 15, 32, 36, 42, 58, 88, 188, 259, 345, 356, 564, 757, 837, 999)  # 16 seeds
+sampleset <- c(24, 18, 12, 6)
+
+bp <- MulticoreParam(length(seedset), progressbar=TRUE)
+
+for (size in c(24, 18, 12, 6)){
+    bplapply(seedset, BPPARAM=bp, FUN=function(seed){
+        # subsampling and group assignment
+        se_sub <- subsampling(se = se, sampleSize = size, seed = seed)
+
+        # filter low counts
+        se_sub <- filterLowCounts(se_sub)
+        # calculate the logcpm
+        dge <- DGEList(assay(se_sub, "counts"))
+        dge <- calcNormFactors(dge)
+        assay(se_sub, "logcpm") <- log1p(edgeR::cpm(dge)[rownames(se_sub),])
+
+        # n.sv threshold
+        set.seed(8)
+        test1 <- svacor_PL(se_sub, ~ se_sub$group, numSVmethod = "be")
+        maxSV <- sum(grepl("^SV", names(colData(test1))))
+        metadata(se_sub)$"BE" <- paste0("n.sv_", maxSV)
+
+        test2 <- tryCatch({  # here we use this because the SVA sometimes recommend too much SVs, and it gives error when sample size is too low
+            set.seed(24)
+            test2 <- svacor_PL(se_sub, ~ se_sub$group, numSVmethod = "leek")
+            minSV <- sum(grepl("^SV", names(colData(test2))))
+            metadata(se_sub)$"LEEK" <- paste0("n.sv_", minSV)
+            test2},
+            error = function(e) {
+                cat("for sample size", size, ", svacor failed: ", e$message, " — skipping\n", 
+                    file = "OUTPUT_spike_in_data_simu.txt", 
+                    append=TRUE)
+                NULL  # returns NULL instead of crashing
+            })
+        if (is.null(test2)) {metadata(se_simu)$LEEK <- NA}
+            
+        # LETS TEST ========================================================
+        test_result <- list()
+        for (n in 0:6){  # It doesn't make sense to use too much SVs so lets restrict the maximum to 6 SVs
+            if(n < (ncol(se_sub) - 2)){  # here, for example if we have 3vs3, then if we use 4 SVs, and we also have intercept + group to estimate and the dispersion, the model is under-determined (meaning that the design doesn't have enough degrees of freedom to support so many parameters)
+            test_result[[paste0("n.sv_", n)]] <- Lets_test(se = se_sub, dge = dge, n_SV = n,
+            MDS_name = paste0("./MDS_spike_in_data_two_confounder/", size, "samples_seed_", seed))
+            }
+        }
+        saveRDS(test_result, paste0("./test_results_spike_in_data_two_confounder/test_results_DiffSampleSize_", size, "_seed_", seed, ".rds"))
+        
+        # P value hist
+        for(i in names(test_result)){
+            p <- ggplot(test_result[[i]][["DEA"]]$AvsB, aes(x = PValue)) +
+                geom_histogram(bins = 50, fill = "steelblue", color = "white", alpha = 0.8, boundary = 0)+
+                labs(title = paste0("pvalue histogram - ", i))
+            ggsave(paste0("./pval_hist_spike_in_data_two_confounder/", size, "samples_seed_", seed, "_", i, ".pdf"), width = 8, height = 6)
+        }
+    })
+}
+
+```
+
+# test results path
+
+```{r}
+res_path <- paste0("./test_results_spike_in_data_two_confounder")
+files <- list.files(
+    path    = res_path,
+    pattern = "^test_results_DiffSampleSize_\\d+_seed_\\d+\\.rds$",
+    full.names = TRUE
+)
+```
+
+# Visulization parameters
+
+```{r}
+seed_colors <- setNames(
+    c("steelblue", "tomato", "seagreen", "darkorchid", "goldenrod", "deeppink",
+    "dodgerblue", "orangered", "mediumseagreen", "mediumpurple", "chocolate",
+    "cyan4", "firebrick", "royalblue", "darkolivegreen", "hotpink"),
+    seedset
+)
+seed_levels <- seedset
+sample_levels <- sampleset
+
+```
+
+# DEG number combined plot
+
+```{r}
+df_deg <- get_DEG_num(files, path)
+df_deg$seed <- factor(df_deg$seed, levels = seed_levels)
+df_deg$sample_size <- factor(df_deg$sample_size, levels = sample_levels)
+
+p_deg <- ggplot(df_deg, aes(x = n_sv, y = DEG_num, fill = seed)) +
+    geom_col()+
+    geom_vline(aes(xintercept = sv_suggested, linetype = sv_method, color = sv_method)) + 
+    scale_color_manual(name = "Suggested SV", values = c("BE" = "red", "LEEK" = "blue")) +
+    scale_linetype_manual(name = "Suggested SV", values = c("BE" = "longdash", "LEEK" = "dotted")) +
+    facet_grid(seed ~ sample_size, labeller = label_both) +
+    labs(title = "Number of DEGs", x = "Number of SVs", y = "Number of DEGs") + 
+    scale_fill_manual(values = seed_colors) + 
+    theme_bw()+
+    theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1), 
+          axis.text.y = element_text(size = 10), 
+          strip.text.x = element_text(size = 14), 
+          strip.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          plot.title = element_text(size = 16),
+          panel.spacing.y = unit(0.2, "cm"))
+p_deg
+
+# ggsave("./spike_in_two_confounder_combined_DEG_num.pdf", p_deg, width = 10, height = 16)
+
+```
+
+# DEG correlation
+
+```{r}
+N <- 1000 
+
+auc_all <- get_DEG_ranking_cor_auc(N, files, path)
+auc_all$seed <- factor(auc_all$seed, levels = seed_levels)
+auc_all$sample_size <- factor(auc_all$sample_size, levels = sample_levels)
+# p_auc_deg_cor <- ggplot(auc_all, aes(x = col1, y = col2, fill = auc)) +
+#     geom_tile()+
+#     geom_text(aes(label = round(auc, 2)), size = 2) +
+#     scale_fill_gradient2(low = "cornflowerblue", mid = "white", high = "firebrick3", midpoint = 0.5, limits = c(0, 1)) +
+#     facet_grid(seed ~ sample_size,
+#                labeller = labeller(sample_size = function(x) paste("SampleSize =", x),
+#                                seed = function(x) paste("seed =", x)))+
+#     labs(title = "AUC of DEG overlap curve", x = "", y = "AUC (normalized)") +
+#     theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# p_auc_deg_cor
+# ggsave("./spike_in_two_confounder_DEGs_rank_correlation_map.pdf", p_auc_deg_cor, width = 13, height = 13)
+
+# only show half of them in the plot (since it's symmetric)
+auc_lower <- auc_all %>%
+    filter(as.integer(factor(col1)) >= as.integer(factor(col2)))
+auc_lower$seed <- factor(auc_lower$seed, levels = seed_levels)
+auc_lower$sample_size <- factor(auc_lower$sample_size, levels = sample_levels)
+
+p_auc_deg_cor_half <- ggplot(auc_lower, aes(x = col1, y = col2, fill = auc)) +
+    geom_tile()+
+    geom_text(aes(label = round(auc, 2)), size = 2) +
+    scale_fill_gradient2(low = "cornflowerblue", mid = "white", high = "firebrick3", 
+                         midpoint = 0.5, limits = c(0, 1)) +
+    facet_grid(seed ~ sample_size, labeller = label_both)+
+    labs(title = "DEG Overlap Score", x = "Number of SVs", y = "Number of SVs", fill = "AUC of \noverlap curve") +
+    theme_bw()+
+    theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1), 
+          axis.text.y = element_text(size = 10), 
+          strip.text.x = element_text(size = 14), 
+          strip.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          plot.title = element_text(size = 16),
+          panel.spacing.y = unit(0.2, "cm"))
+p_auc_deg_cor_half
+
+# ggsave("./spike_in_two_confounder_DEGs_rank_correlation_map_half.pdf", p_auc_deg_cor_half, width = 10, height = 16)
+
+```
+
+# p value skew
+
+```{r}
+# pskew <- get_pskew(files, path)
+
+# pskew_long <- pskew %>% pivot_longer(
+#     cols = -c("sample_size", "seed"),
+#     names_to = "nsv",
+#     values_to = "pskew"
+# )
+# pskew_long$seed <- factor(pskew_long$seed)
+# pskew_long$sample_size <- factor(pskew_long$sample_size, levels = c(24,18,12,6))
+# p_pskew <- ggplot(pskew_long, aes(x = nsv, y = seed, fill = pskew)) + 
+#     geom_tile()+
+#     facet_grid(~sample_size,
+#             labeller = labeller(sample_size = function(x) paste("SampleSize =", x)))+
+#     scale_fill_gradient2(low = "cornflowerblue", mid = "white", high = "firebrick3") +
+#     labs(fill = "mean(p)-0.5")
+# p_pskew
+# # ggsave(paste0("./spike_in_two_confounder_p_skew_map.pdf"), p_pskew, width = 13, height = 8)
+
+```
+
+# correlation of SV value from n_sv.x
+
+the correlation between each SVs in one SVA correction
+
+```{r}
+# cor_all <- get_SV_value_correlation(files, path)
+
+# p_svcor <- ggplot(cor_all, aes(x = Var1, y = Var2, fill = Freq)) +
+#     geom_tile() +
+#     geom_text(aes(label = round(Freq, 2)), size = 3) +
+#     scale_fill_gradient2(low = "cornflowerblue", mid = "white", high = "firebrick3", 
+#                      midpoint = 0, limits = c(-1, 1)) +
+#     facet_grid(seed ~ sample_size)+
+#     labs(title = "SV Correlation Heatmap", x = "", y = "", fill = "correlation") +
+#     theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# p_svcor
+# # ggsave(paste0("./spike_in_two_confounder_SV_correlation_map.pdf"), p_svcor, width = 30, height = 45)
+
+```
+
+## curve
+
+For each n.sv level, find the maximum correlation between the LAST SV added and all previous SVs. 
+
+```{r}
+cor_curve <- get_SV_value_correlation_curve(files, path)
+cor_curve$seed <- factor(cor_curve$seed, levels = seed_levels)
+cor_curve$sample_size <- factor(cor_curve$sample_size, levels = sample_levels)
+
+p_cor_curve <- ggplot(cor_curve, aes(x = nsv, y = maxcor, color = seed, group = seed)) + 
+    geom_point(size = 2) + 
+    geom_line(linewidth = 1)+
+    scale_color_manual(values = seed_colors) + 
+    new_scale_color() + 
+    geom_vline(aes(xintercept = sv_suggested, linetype = sv_method, color = sv_method)) + 
+    scale_color_manual(name = "Suggested SV", values = c("BE" = "red", "LEEK" = "blue")) +
+    scale_linetype_manual(name = "Suggested SV", values = c("BE" = "longdash", "LEEK" = "dotted")) +
+    facet_grid(seed ~ sample_size, labeller = label_both) +
+    labs(title = "SV Correlation curve", x = "Number of SVs", y = "SV Correlation Score") + 
+    scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.05)), labels = scales::label_scientific(digits = 2))+
+    theme_bw()+
+    theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1), 
+          axis.text.y = element_text(size = 10), 
+          strip.text.x = element_text(size = 14), 
+          strip.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          plot.title = element_text(size = 16),
+          panel.spacing.y = unit(0.4, "cm"))
+
+p_cor_curve
+
+# ggsave(paste0("./spike_in_two_confounder_SV_correlation_curve.pdf"), p_cor_curve, width = 10, height = 16)
+
+```
+
+# MDS separation
+
+Here we check how much more the two groups are separated with the increase of the SV number
+
+```{r}
+df_pve <- get_MDS_separation(files, path)
+
+df_pve$sample_size <- factor(df_pve$sample_size, levels = c(24, 18, 12 ,6))
+df_pve$seed <- factor(df_pve$seed, levels = seed_levels)
+
+p_pve <- ggplot(df_pve, aes(x = n_sv, y = pve, color = seed, group = seed)) + 
+    geom_point(size = 2) + 
+    geom_line(linewidth = 1)+
+    scale_color_manual(values = seed_colors) + 
+    new_scale_color() + 
+    geom_vline(aes(xintercept = sv_suggested, linetype = sv_method, color = sv_method)) + 
+    scale_color_manual(name = "Suggested SV", values = c("BE" = "red", "LEEK" = "blue")) +
+    scale_linetype_manual(name = "Suggested SV", values = c("BE" = "longdash", "LEEK" = "dotted")) +
+    facet_grid(seed ~ sample_size, labeller = label_both) + 
+    labs(title = "MDS separation contribution", x = "Number of SVs", y = "Proportion of Variance Explained") +
+    theme_bw()+
+    theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1), 
+          axis.text.y = element_text(size = 10), 
+          strip.text.x = element_text(size = 14), 
+          strip.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          plot.title = element_text(size = 16),
+          panel.spacing.y = unit(0.3, "cm"))
+
+p_pve
+# ggsave("./spike_in_two_confounder_MDS_separation_contribution_curve.pdf", p_pve, width = 10, height = 16)
+
+```
+
+# SV contribution to correction
+
+```{r}
+df_sumAbsBs <- get_SV_contribution_to_correction(files, path)
+
+# p_sumAbsBs <- ggplot(df_sumAbsBs, aes(x = SV_id, y = sumAbsBs, fill = SV)) +
+#     geom_col() +
+#     facet_grid(seed ~ sample_size, labeller = label_both) +
+#     labs(title = "Contributions of each SV on the correction", y = "sumAbsBs", x = "SV") +
+#     theme_bw() +
+#     theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# p_sumAbsBs
+# # ggsave("./spike_in_two_confounder_Contributions_of_SV_on_correction.pdf", p_sumAbsBs, width = 15, height = 12)
+
+df_sumAbsBs_max <- df_sumAbsBs %>%
+    group_by(sample_size, seed) %>%
+    filter(as.integer(str_extract(n_sv, "\\d+")) == max(as.integer(str_extract(n_sv, "\\d+")))) %>%
+    ungroup()
+df_sumAbsBs_max$seed <- factor(df_sumAbsBs_max$seed, levels = seed_levels)
+df_sumAbsBs_max$sample_size <- factor(df_sumAbsBs_max$sample_size, levels = sample_levels)
+
+p_sumAbsBs_max <- ggplot(df_sumAbsBs_max, aes(x = SV, y = sumAbsBs, fill = seed)) +
+    geom_col() +
+    facet_grid(seed ~ sample_size, labeller = label_both) +
+    labs(title = "Contributions of each SV on the correction", y = "sumAbsBs", x = "SV") +
+    scale_fill_manual(values = seed_colors) + 
+    theme_bw()+
+    theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1), 
+          axis.text.y = element_text(size = 10), 
+          strip.text.x = element_text(size = 14), 
+          strip.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          plot.title = element_text(size = 16),
+          panel.spacing.y = unit(0.3, "cm"))
+
+p_sumAbsBs_max
+# ggsave("./spike_in_two_confounder_Contributions_of_SV_on_correction_maxSVnum.pdf", p_sumAbsBs_max, width = 10, height = 16)
+```
+
+# SV contribution to logFC of the DEGs
+
+```{r}
+df_SV_contribute <- get_SV_contribution_to_logFC_DEG(files, path)
+df_SV_contribute$seed <- factor(df_SV_contribute$seed, levels = seed_levels)
+df_SV_contribute$sample_size <- factor(df_SV_contribute$sample_size, levels = sample_levels)
+
+p_SV_contribute <- ggplot(df_SV_contribute, aes(x = n_sv, y = SV_contribute, color = seed, group = seed)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    scale_color_manual(values = seed_colors) + 
+    new_scale_color() + 
+    geom_vline(aes(xintercept = sv_suggested, linetype = sv_method, color = sv_method)) + 
+    scale_color_manual(name = "Suggested SV", values = c("BE" = "red", "LEEK" = "blue")) +
+    scale_linetype_manual(name = "Suggested SV", values = c("BE" = "longdash", "LEEK" = "dotted")) +
+    facet_grid(seed ~ sample_size, labeller = label_both) +
+    labs(title = "SV contribution to logFC", x = "Number of SVs", y = "DEGs, Max mean(logFC_SV - logFC_AvsB)", color = "seed") +
+    theme_bw()+
+    theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1), 
+          axis.text.y = element_text(size = 10), 
+          strip.text.x = element_text(size = 14), 
+          strip.text.y = element_text(size = 12),
+          axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 14),
+          plot.title = element_text(size = 16),
+          panel.spacing.y = unit(0.3, "cm"))
+p_SV_contribute
+# ggsave("./spike_in_two_confounder_SV_contribute_logFC.pdf", p_SV_contribute, width = 10, height = 16)
+```
+
+# combine the proxy curves
+
+```{r}
+# ── 1. DEG count ─────────────────────────────────────────────────────────────
+df_deg_long <- df_deg %>%
+    dplyr::select(sample_size, seed, n_sv, DEG_num, sv_method, sv_suggested) %>%
+    rename(value = DEG_num) %>%
+    mutate(proxy = "DEG Count")
+
+# ── 2. AUC: nsv_k vs nsv_{k-1} (neighbor stability) ────────────────────────
+# Re-derive from auc_all: keep only consecutive-neighbor pairs
+auc_neighbor <- auc_all %>%
+    mutate(
+        k1 = as.integer(str_extract(col1, "\\d+")),
+        k2 = as.integer(str_extract(col2, "\\d+"))
+    ) %>%
+    filter(k2 == k1 - 1) %>%                          # col1 = nsv_k, col2 = nsv_{k-1}
+    mutate(n_sv = paste0("n.sv_", k1)) %>%             # assign to the higher nsv level
+    dplyr::select(sample_size, seed, n_sv, auc) %>%
+    rename(value = auc) %>%
+    mutate(proxy = "DEG Overlap\n(vs prev SV)")
+
+# ── 3. MDS separation (PVE) ──────────────────────────────────────────────────
+df_pve_long <- df_pve %>%
+    dplyr::select(sample_size, seed, n_sv, pve, sv_method, sv_suggested) %>%
+    rename(value = pve) %>%
+    mutate(proxy = "MDS Separation\n(PVE)")
+
+# ── 5. SV contribution ───────────────────────────────────────────────────────────────
+df_sumAbsBs_long <- df_sumAbsBs_max %>%
+    dplyr::mutate(
+        n_sv  = paste0("n.sv_", str_extract(SV, "\\d+"))
+    ) %>%
+    dplyr::rename(value = sumAbsBs) %>%
+    dplyr::select(sample_size, seed, n_sv, value) %>%
+    dplyr::mutate(
+        proxy        = "SV Contribution\n(sumAbsBs)",
+        sv_method    = NA_character_,
+        sv_suggested = NA_character_
+    )
+
+# ── 6. Bind proxies that carry vline info, add empty vline cols to auc ───────
+vline_proxies <- bind_rows(df_deg_long, df_pve_long)
+# Extract one vline table (same across proxies — take from df_deg_long)
+vlines <- df_deg_long %>%
+    dplyr::select(sample_size, seed, sv_method, sv_suggested) %>%
+    distinct()
+
+auc_neighbor <- auc_neighbor %>%
+    mutate(sv_method = NA_character_, sv_suggested = NA_character_)
+
+all_proxies_raw <- bind_rows(vline_proxies, auc_neighbor, df_sumAbsBs_long)
+
+# ── 7. Min-max normalise within each panel × proxy ───────────────────────────
+all_proxies <- all_proxies_raw %>%
+    group_by(sample_size, seed, proxy) %>%
+    mutate(
+        vmax  = max(value, na.rm = TRUE),
+        value_norm = value / (vmax+0.01)   # here add 0.01 to prevent vmax=0
+    ) %>%
+    ungroup() %>%
+    mutate(
+        sample_size = factor(sample_size, levels = sample_levels),
+        seed        = factor(seed,        levels = seed_levels),
+        proxy       = factor(proxy, levels = c("DEG Count",
+                                               "DEG Overlap\n(vs prev SV)",
+                                               "MDS Separation\n(PVE)",
+                                               "SV Contribution\n(sumAbsBs)"))
+    )
+
+# ── 7. Proxy colour palette ───────────────────────────────────────────────────
+proxy_colors <- c(
+    "DEG Count"              = "#cf191c",
+    "DEG Overlap\n(vs prev SV)" = "#f9b52d",
+    "MDS Separation\n(PVE)" = "#19a415",
+    "SV Contribution\n(sumAbsBs)" = "#992aba"
+)
+
+# ── 8. Combined plot ──────────────────────────────────────────────────────────
+p_combined <- ggplot(all_proxies, aes(x = n_sv, y = value_norm, color = proxy, group = proxy)) +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 1.6) +
+    scale_color_manual(
+        name   = "Proxy",
+        values = proxy_colors
+    ) +
+    # BE / LEEK suggested-SV vlines
+    new_scale_color()+
+    geom_vline(
+        data = vlines %>%
+            mutate(sample_size = factor(sample_size, levels = sample_levels),
+                   seed        = factor(seed,        levels = seed_levels)) %>%
+            filter(!is.na(sv_suggested)),
+        aes(xintercept = sv_suggested,
+            linetype   = sv_method,
+            color      = sv_method),          # reuse color aes — add to scale below
+        inherit.aes = FALSE
+    ) +
+    scale_color_manual(
+        name   = "Suggested SV",
+        values = c("BE" = "red", "LEEK" = "blue")
+    ) +
+    scale_linetype_manual(
+        name   = "Suggested SV",
+        values = c("BE" = "longdash", "LEEK" = "dotted")
+    ) +
+    # keep proxy lines solid; vlines get their own linetypes via the data
+    facet_grid(seed ~ sample_size, labeller = label_both) +
+    scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
+    labs(
+        title = "iPSC with two confounders - Combined proxy curves (max normalized)",
+        x     = "Number of SVs",
+        y     = "Normalised value"
+    ) +
+    theme_bw() +
+    theme(
+        axis.text.x    = element_text(size = 11, angle = 45, hjust = 1),
+        axis.text.y    = element_text(size = 11),
+        strip.text.x   = element_text(size = 13),
+        strip.text.y   = element_text(size = 13),
+        axis.title.x   = element_text(size = 13),
+        axis.title.y   = element_text(size = 13),
+        plot.title     = element_text(size = 15),
+        legend.title = element_text(face = "bold"),
+        legend.position = "bottom",
+        panel.spacing.y = unit(0.4, "cm")
+    ) +
+    guides(
+        color    = guide_legend(nrow = 1),
+        linetype = guide_legend(nrow = 1)
+    )
+
+p_combined
+ggsave("./spike_in_two_confounder_combine.pdf", p_combined, width = 10, height = 18)
+```
+
