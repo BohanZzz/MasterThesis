@@ -1,0 +1,510 @@
+---
+title: "Sperm Small RNA Analysis"
+output: html_document
+author: "Bohan Zhang"
+date: "2026-06-05"
+---
+
+```{r setup}
+library(edgeR)
+library(SummarizedExperiment)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggplot2)
+library(limma)
+library(ComplexHeatmap)
+library(sechm)
+library(decoupleR)
+library(tidyr)
+library(dplyr)
+library(rtracklayer)
+library(epiwraps)
+library(stringr)
+library(BiocParallel)
+library(openxlsx)
+library(ggpubr)
+library(emmeans)
+library(GenomicFeatures)
+library(txdbmaker)
+library(AnnotationHub)
+library(GenomeInfoDb)
+library(memes)
+library(ggrepel)
+library(cowplot)
+library(patchwork)
+library(magick)
+library(cluster)
+library(ggsignif)
+library(ggplotify)
+ah <- AnnotationHub()
+setwd("/mnt/gapp/work/bohan/thesis/IFS_sperm_smallRNA")
+```
+
+# fig 15
+
+size distribution
+
+```{r}
+lf <- list.files("/mnt/gapp/internData/2026_iryna_vincent_EXP31_IFS_PROTAC_smallRNA_X204SC26015406-Z01-F001/sports_GRCm38_L50_newRef", pattern="_summary\\.txt$", recursive=TRUE, full.names=TRUE)
+names(lf) <- gsub("_summary\\.txt$", "", basename(lf))
+
+# First of all, let's only keep "Match_Genome"
+ld <- lapply(lf, function(path) {
+  df <- read.delim(path, header = TRUE)
+  filtered <- df[grepl("Match_Genome", df$Class) & df$Sub_Class=="-",]
+  filtered <- filtered[filtered$Class %in% c(
+    "miRBase-miRNA_Match_Genome", 
+    "rRNAdb-rRNA_Match_Genome", 
+    "YRNAdb-YRNA_Match_Genome",
+    "GtRNAdb-pre-tRNA_Match_Genome",
+    "GtRNAdb-pre-tRNA_5_end_Match_Genome",
+    "GtRNAdb-mature-tRNA_Match_Genome", 
+    "GtRNAdb-mature-tRNA_5_end_Match_Genome", 
+    "GtRNAdb-mature-tRNA_3_end_Match_Genome", 
+    "GtRNAdb-mature-tRNA_CCA_end_Match_Genome", 
+    "mitotRNAdb-mature-mt_tRNA_Match_Genome",
+    "mitotRNAdb-mature-mt_tRNA_5_end_Match_Genome",
+    "mitotRNAdb-mature-mt_tRNA_3_end_Match_Genome",
+    "mitotRNAdb-mature-mt_tRNA_CCA_end_Match_Genome",
+    "piRNAdb-piRNA_Match_Genome", 
+    "ensembl-snRNA_Match_Genome", 
+    "ensembl-snoRNA_Match_Genome", 
+    "ensembl-lincRNA_Match_Genome"),]
+  # now we sum up all the tRNA group:
+  filtered <- rbind(filtered, c("tRNA", "-", sum(filtered$Reads[which(filtered$Class %in% c("GtRNAdb-mature-tRNA_Match_Genome", "GtRNAdb-mature-tRNA_5_end_Match_Genome", "GtRNAdb-mature-tRNA_3_end_Match_Genome", "GtRNAdb-mature-tRNA_CCA_end_Match_Genome"))])))
+  filtered$Reads <- as.numeric(filtered$Reads)
+  # now we remove the subgroup of tRNA
+  filtered <- filtered[!(filtered$Class %in% c("GtRNAdb-mature-tRNA_Match_Genome", "GtRNAdb-mature-tRNA_5_end_Match_Genome", "GtRNAdb-mature-tRNA_3_end_Match_Genome", "GtRNAdb-mature-tRNA_CCA_end_Match_Genome")),]
+
+  # now we do the same for pretRNA group:
+  filtered <- rbind(filtered, c("pre-tRNA", "-", sum(filtered$Reads[which(filtered$Class %in% c("GtRNAdb-pre-tRNA_Match_Genome", 
+  "GtRNAdb-pre-tRNA_5_end_Match_Genome"))])))
+  filtered$Reads <- as.numeric(filtered$Reads)
+  # now we remove the subgroup of pre-tRNA
+  filtered <- filtered[!(filtered$Class %in% c("GtRNAdb-pre-tRNA_Match_Genome", "GtRNAdb-pre-tRNA_5_end_Match_Genome")),]
+
+  # now we do the same for mito-tRNA group:
+  filtered <- rbind(filtered, c("mito-tRNA", "-", sum(filtered$Reads[which(filtered$Class %in% c("mitotRNAdb-mature-mt_tRNA_Match_Genome",
+    "mitotRNAdb-mature-mt_tRNA_5_end_Match_Genome",
+    "mitotRNAdb-mature-mt_tRNA_3_end_Match_Genome",
+    "mitotRNAdb-mature-mt_tRNA_CCA_end_Match_Genome"))])))
+  filtered$Reads <- as.numeric(filtered$Reads)
+  # now we remove the subgroup of pre-tRNA
+  filtered <- filtered[!(filtered$Class %in% c("mitotRNAdb-mature-mt_tRNA_Match_Genome",
+    "mitotRNAdb-mature-mt_tRNA_5_end_Match_Genome",
+    "mitotRNAdb-mature-mt_tRNA_3_end_Match_Genome",
+    "mitotRNAdb-mature-mt_tRNA_CCA_end_Match_Genome")),]
+
+  filtered <- filtered[,-2] #remove the subclass column
+  filtered$Class <- sub(".*-(.*)_Match_Genome", "\\1", filtered$Class)
+  return(filtered)
+})
+ld
+
+df <- bind_rows(ld, .id = "sample") %>%
+  group_by(sample) %>%
+  mutate(prop = Reads / sum(Reads)) %>% 
+  ungroup()
+
+df$sample <- sub("^[^_]+_([^_]+)_.*", "\\1", df$sample)
+df$stress <- factor(ifelse(grepl("C", df$sample), "ctrl", "stress"), levels = c("ctrl", "stress"))
+df$protac <- factor(ifelse(grepl("D", df$sample), "DMSO", "PROTAC"), levels = c("DMSO", "PROTAC"))
+df$Class <- factor(df$Class, levels = c("tRNA", "pre-tRNA", "mito-tRNA", "miRNA", "rRNA", "piRNA", "snoRNA", "snRNA", "lincRNA"))
+df <- df[order(df$stress, df$protac, df$Class),]
+df$sample <- factor(df$sample, levels = unique(df$sample))
+my_colors <- c(
+  "tRNA"    = "#9b3b9d",
+  "pre-tRNA" = "firebrick3", 
+  "mito-tRNA" = "salmon", 
+  "miRNA"   = "#D48C2C", 
+  "rRNA"    = "#4CAF50", 
+  "piRNA"   = "#2EC4B6",
+  "snoRNA"  = "#f9f223", 
+  "snRNA"   = "#3c00ff",
+  "lincRNA" = "#FF69B4"
+)
+fig15 <- ggplot(df, aes(x = prop, y = sample, fill = Class)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+  scale_x_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = my_colors, breaks = levels(df$Class)) + 
+  labs(title = "Sperm small RNA size distribution", x = "% of reads", y = NULL, fill = "type") +
+  theme_classic() +
+  theme(legend.position = "right",
+        axis.title  = element_text(size = 18, face = "bold"),
+        title  = element_text(size = 18, face = "bold"),
+        axis.text   = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 18),
+        plot.title = element_text(hjust=0.5)
+) 
+fig15
+```
+
+# fig 16a
+
+volcano plot miRNA kH-103 vs. DMSO
+
+```{r}
+se <- readRDS("IFS_PROTAC_sperm_smallRNA_GRCm38_newRef.rds")
+
+#Exclude piRNA:
+# actually in this se there is no piRNA
+
+# Now in our data, for tRNA: we have Match_genome and Unmatch_genome for the same tRNA annotation. We collapse them:
+counts_df <- as.data.frame(assay(se, "counts"))
+counts_df$feature <- rownames(counts_df)
+# for nucleus tRNA:
+counts_df$merge_key <- ifelse(
+  str_detect(counts_df$feature, "GtRNAdb-mature-tRNA") &
+    str_detect(counts_df$feature, "(Match|Unmatch)_Genome") &
+    !str_detect(counts_df$feature, "(_3_end|_5_end)"),
+  str_replace(counts_df$feature, "(Match|Unmatch)_Genome/(.+)", "Combined_Genome/\\2"),
+  counts_df$feature
+)
+# for mitochondrial tRNA: (similar)
+counts_df$merge_key <- ifelse(
+  str_detect(counts_df$feature, "mitotRNAdb-mature-mt_tRNA") &
+    str_detect(counts_df$feature, "(Match|Unmatch)_Genome") &
+    !str_detect(counts_df$feature, "(_3_end|_5_end)"),
+  str_replace(counts_df$feature, "(Match|Unmatch)_Genome/(.+)", "Combined_Genome/\\2"),
+  counts_df$merge_key
+)
+
+counts_df$feature <- NULL  # drop before aggregation
+counts_merged <- aggregate(. ~ merge_key, data = counts_df, FUN = sum)
+rownames(counts_merged) <- counts_merged$merge_key
+counts_merged$merge_key <- NULL
+
+se_collapse <- SummarizedExperiment(
+  assays = list(counts = as.matrix(counts_merged)),
+  colData = colData(se)
+)
+se_collapse # 2238 smallRNAs
+se_collapse <- se_collapse[,order(se_collapse$stress, se_collapse$protac)]
+rm(se)
+
+# add donor info
+colData(se_collapse)$donor <- sub("^(C[0-9]+|I[0-9]+)[DK]$", "\\1", colData(se_collapse)$sampleid)
+colData(se_collapse)$donor <- factor(colData(se_collapse)$donor)
+metadata(se_collapse)$anno_colors <- list(stress = c(stress = "red3", ctrl ="#56B4E9"),
+                                          protac = c(PROTAC = "orange2", DMSO = "navy"))
+colnames(se_collapse) <- se_collapse$sampleid
+
+dge_tmp <- DGEList(assay(se_collapse, "counts"))
+dge_tmp <- calcNormFactors(dge_tmp)
+assay(se_collapse, "logcpm") <- log1p(edgeR::cpm(dge_tmp)[rownames(se_collapse),])
+
+
+se_mirna <- se_collapse[grep("miRNA", rownames(se_collapse)),]  # 970
+se_trna <- se_collapse[grep("GtRNAdb", rownames(se_collapse)), ]  # 181 (no mito-tRNA)
+se_mito_trna <- se_collapse[grep("mitotRNAdb", rownames(se_collapse)), ]  # 75
+```
+
+miRNA
+
+```{r}
+group <- factor(se_mirna$group)
+set.seed(8)
+se_mirna <- SEtools::svacor(se_mirna, ~group, n.sv = 1)  # the suggested sv number is 2
+
+# counts filter
+dge_for_filter <- DGEList(assay(se_mirna, "counts"))
+dge_for_filter <- calcNormFactors(dge_for_filter)
+design_for_filter <- model.matrix(~ 0 + group, data = as.data.frame(colData(se_mirna)))
+keep <- filterByExpr(dge_for_filter, min.count = 5, design = design_for_filter)
+se_mirna  <- se_mirna[keep, ]  # 942 kept
+
+# voom
+dge_mirna <- DGEList(assay(se_mirna, "counts"))
+dge_mirna <- calcNormFactors(dge_mirna)
+design_mirna <- model.matrix(~ 0 + group + SV1, data = as.data.frame(colData(se_mirna)))
+# ── 2. First voom + first duplicateCorrelation pass ───────────────────────────
+vobj_for_dupcor_mirna <- voom(dge_mirna, design_mirna, plot = FALSE)
+dupcor_mirna <- duplicateCorrelation(vobj_for_dupcor_mirna, design_mirna, block = colData(se_mirna)$donor)
+
+# ── 3. Second voom pass, now informed by the donor correlation ─────────────────
+vobj_mirna <- voom(dge_mirna, design_mirna, plot = FALSE, block = colData(se_mirna)$donor,
+             correlation = dupcor_mirna$consensus)
+
+# ── 4. Second duplicateCorrelation pass on the better voom weights ─────────────
+dupcor_mirna <- duplicateCorrelation(vobj_mirna, design_mirna, block = colData(se_mirna)$donor)
+
+# ── 5. Fit the linear model ────────────────────────────────────────────────────
+fit_mirna <- lmFit(vobj_mirna, design_mirna, block=colData(se_mirna)$donor, correlation = dupcor_mirna$consensus)
+
+contrast_mirna <- makeContrasts(
+  total_stress_vs_ctrl  = (groupstress_DMSO + groupstress_PROTAC)/2 - (groupctrl_DMSO + groupctrl_PROTAC)/2,
+  DMSO_stress_vs_ctrl   = groupstress_DMSO - groupctrl_DMSO,
+  PROTAC_stress_vs_ctrl = groupstress_PROTAC - groupctrl_PROTAC,
+  total_PROTAC_vs_DMSO  = (groupstress_PROTAC + groupctrl_PROTAC)/2 - (groupstress_DMSO + groupctrl_DMSO)/2,
+  ctrl_PROTAC_vs_DMSO   = groupctrl_PROTAC - groupctrl_DMSO,
+  stress_PROTAC_vs_DMSO = groupstress_PROTAC - groupstress_DMSO,
+  interaction           = (groupstress_PROTAC - groupctrl_PROTAC) - (groupstress_DMSO - groupctrl_DMSO),
+  levels = design_mirna
+)
+
+fit2_mirna <- contrasts.fit(fit_mirna, contrast_mirna)
+fit2_mirna <- eBayes(fit2_mirna)  # Empirical Bayes smoothing of standard errors
+
+# extract each contrast table 
+rowData(se_mirna)$DEA.voom.total_stress_vs_ctrl <- topTable(fit2_mirna, coef = "total_stress_vs_ctrl", n = Inf)[rownames(se_mirna),]
+rowData(se_mirna)$DEA.voom.DMSO_stress_vs_ctrl <- topTable(fit2_mirna, coef = "DMSO_stress_vs_ctrl", n = Inf)[rownames(se_mirna),]
+rowData(se_mirna)$DEA.voom.PROTAC_stress_vs_ctrl <- topTable(fit2_mirna, coef = "PROTAC_stress_vs_ctrl", n = Inf)[rownames(se_mirna),]
+rowData(se_mirna)$DEA.voom.total_PROTAC_vs_DMSO <- topTable(fit2_mirna, coef = "total_PROTAC_vs_DMSO", n = Inf)[rownames(se_mirna),]
+rowData(se_mirna)$DEA.voom.ctrl_PROTAC_vs_DMSO <- topTable(fit2_mirna, coef = "ctrl_PROTAC_vs_DMSO", n = Inf)[rownames(se_mirna),]
+rowData(se_mirna)$DEA.voom.stress_PROTAC_vs_DMSO <- topTable(fit2_mirna, coef = "stress_PROTAC_vs_DMSO", n = Inf)[rownames(se_mirna),]
+rowData(se_mirna)$DEA.voom.interaction <- topTable(fit2_mirna, coef = "interaction", n = Inf)
+
+table(rownames(se_mirna)== rownames(vobj_mirna$E))
+assay(se_mirna, "voom.val") <- vobj_mirna$E
+```
+
+```{r}
+# protac effect
+res_mirna <- rowData(se_mirna)$DEA.voom.total_PROTAC_vs_DMSO
+res_mirna <- res_mirna[order(res_mirna$P.Value),]
+res_mirna$gene <- sub(".*mmu-", "", rownames(res_mirna))
+top6 <- head(res_mirna, 6)
+
+sig_anno_mirna <- rep("non", times = nrow(res_mirna))
+sig_anno_mirna[which(res_mirna$adj.P.Val < 0.05 & res_mirna$logFC > 0)] <- "up"  # no ups
+sig_anno_mirna[which(res_mirna$adj.P.Val < 0.05 & res_mirna$logFC< 0)] <- "down"  # no downs
+
+
+fig16a <- ggplot(res_mirna, aes(x = logFC, y = -log10(P.Value), label = gene)) + 
+  geom_point(aes(color = sig_anno_mirna))+
+  geom_text_repel(
+    data = top6,
+    size = 6,
+    max.overlaps  = 20,
+    box.padding   = 0.3
+    ) +
+    scale_color_manual(name = "significance", values = c("up" = "red", "non" = "gray", "down" = "blue")) +
+    labs(
+      title  = "Sperm miRNA (PROTAC vs. DMSO)",
+    x      = "logFC",
+    y      = "-log10(P.unadj)"
+  ) +
+  theme_bw()+
+  theme(
+    axis.title = element_text(size = 18),
+    axis.text  = element_text(size = 16),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.text  = element_text(size = 16),
+    legend.title = element_text(size = 18),
+    panel.border = element_rect(colour = "grey", fill = NA, linewidth = 2)
+  )
+
+```
+
+# fig 16b
+
+tRNA:
+
+```{r}
+group <- factor(se_trna$group)
+set.seed(8)
+se_trna <- SEtools::svacor(se_trna, ~group, n.sv = 1)  # the suggested sv number is 2
+
+# counts filter
+dge_for_filter <- DGEList(assay(se_trna, "counts"))
+dge_for_filter <- calcNormFactors(dge_for_filter)
+design_for_filter <- model.matrix(~ 0 + group, data = as.data.frame(colData(se_trna)))
+keep <- filterByExpr(dge_for_filter, min.count = 5, design = design_for_filter)
+se_trna  <- se_trna[keep, ]  # 145 kept
+
+# voom
+dge_trna <- DGEList(assay(se_trna, "counts"))
+dge_trna <- calcNormFactors(dge_trna)
+design_trna <- model.matrix(~ 0 + group + SV1, data = as.data.frame(colData(se_trna)))
+# ── 2. First voom + first duplicateCorrelation pass ───────────────────────────
+vobj_for_dupcor_trna <- voom(dge_trna, design_trna, plot = FALSE)
+dupcor_trna <- duplicateCorrelation(vobj_for_dupcor_trna, design_trna, block = colData(se_trna)$donor)
+
+# ── 3. Second voom pass, now informed by the donor correlation ─────────────────
+vobj_trna <- voom(dge_trna, design_trna, plot = FALSE, block = colData(se_trna)$donor,
+             correlation = dupcor_trna$consensus)
+
+# ── 4. Second duplicateCorrelation pass on the better voom weights ─────────────
+dupcor_trna <- duplicateCorrelation(vobj_trna, design_trna, block = colData(se_trna)$donor)
+
+# ── 5. Fit the linear model ────────────────────────────────────────────────────
+fit_trna <- lmFit(vobj_trna, design_trna, block=colData(se_trna)$donor, correlation = dupcor_trna$consensus)
+
+contrast_trna <- makeContrasts(
+  total_stress_vs_ctrl  = (groupstress_DMSO + groupstress_PROTAC)/2 - (groupctrl_DMSO + groupctrl_PROTAC)/2,
+  DMSO_stress_vs_ctrl   = groupstress_DMSO - groupctrl_DMSO,
+  PROTAC_stress_vs_ctrl = groupstress_PROTAC - groupctrl_PROTAC,
+  total_PROTAC_vs_DMSO  = (groupstress_PROTAC + groupctrl_PROTAC)/2 - (groupstress_DMSO + groupctrl_DMSO)/2,
+  ctrl_PROTAC_vs_DMSO   = groupctrl_PROTAC - groupctrl_DMSO,
+  stress_PROTAC_vs_DMSO = groupstress_PROTAC - groupstress_DMSO,
+  interaction           = (groupstress_PROTAC - groupctrl_PROTAC) - (groupstress_DMSO - groupctrl_DMSO),
+  levels = design_trna
+)
+
+fit2_trna <- contrasts.fit(fit_trna, contrast_trna)
+fit2_trna <- eBayes(fit2_trna)  # Empirical Bayes smoothing of standard errors
+
+# extract each contrast table 
+rowData(se_trna)$DEA.voom.total_stress_vs_ctrl <- topTable(fit2_trna, coef = "total_stress_vs_ctrl", n = Inf)[rownames(se_trna),]
+rowData(se_trna)$DEA.voom.DMSO_stress_vs_ctrl <- topTable(fit2_trna, coef = "DMSO_stress_vs_ctrl", n = Inf)[rownames(se_trna),]
+rowData(se_trna)$DEA.voom.PROTAC_stress_vs_ctrl <- topTable(fit2_trna, coef = "PROTAC_stress_vs_ctrl", n = Inf)[rownames(se_trna),]
+rowData(se_trna)$DEA.voom.total_PROTAC_vs_DMSO <- topTable(fit2_trna, coef = "total_PROTAC_vs_DMSO", n = Inf)[rownames(se_trna),]
+rowData(se_trna)$DEA.voom.ctrl_PROTAC_vs_DMSO <- topTable(fit2_trna, coef = "ctrl_PROTAC_vs_DMSO", n = Inf)[rownames(se_trna),]
+rowData(se_trna)$DEA.voom.stress_PROTAC_vs_DMSO <- topTable(fit2_trna, coef = "stress_PROTAC_vs_DMSO", n = Inf)[rownames(se_trna),]
+rowData(se_trna)$DEA.voom.interaction <- topTable(fit2_trna, coef = "interaction", n = Inf)[rownames(se_trna),]
+
+table(rownames(se_trna)== rownames(vobj_trna$E))
+assay(se_trna, "voom.val") <- vobj_trna$E
+```
+
+
+```{r}
+# protac effect
+res_trna <- rowData(se_trna)$DEA.voom.total_PROTAC_vs_DMSO
+res_trna <- res_trna[order(res_trna$P.Value),]
+res_trna$gene <- sub(".*/", "", rownames(res_trna))
+top3 <- head(res_trna, 3)
+
+sig_anno_trna <- rep("non", times = nrow(res_trna))
+sig_anno_trna[which(res_trna$adj.P.Val < 0.05 & res_trna$logFC > 0)] <- "up"  # no ups
+sig_anno_trna[which(res_trna$adj.P.Val < 0.05 & res_trna$logFC< 0)] <- "down"  # no downs
+
+
+fig16b <- ggplot(res_trna, aes(x = logFC, y = -log10(P.Value), label = gene)) + 
+  geom_point(aes(color = sig_anno_trna))+
+  geom_text_repel(
+    data = top3,
+    size = 6,
+    max.overlaps  = 20,
+    box.padding   = 0.3
+    ) +
+    scale_color_manual(name = "Significance", values = c("up" = "red", "non" = "gray", "down" = "blue")) +
+    labs(
+      title  = "Sperm tRNA (PROTAC vs. DMSO)",
+    x      = "logFC",
+    y      = "-log10(P.unadj)"
+  ) +
+  theme_bw()+
+  theme(
+    axis.title = element_text(size = 18),
+    axis.text  = element_text(size = 16),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.text  = element_text(size = 16),
+    legend.title = element_text(size = 18),
+    panel.border = element_rect(colour = "grey", fill = NA, linewidth = 2)
+  )
+
+fig16b
+```
+
+```{r}
+res_trna$gene <- sub(".*/", "", rownames(res_trna))
+top3_trna_total_PROTAC_vs_DMSO <- res_trna[order(res_trna$P.Value),]$gene[1:3]
+# [1] "tRNA-Gly-GCC_3_end" "tRNA-Leu-CAG_5_end" "tRNA-Leu-AAG_3_end"
+```
+
+
+# fig 16c
+
+top1: tRNA-Gly-GCC_3_end
+
+```{r}
+tRNA_Gly_GCC_3_end <- assay(se_trna, "corrected")[which(rownames(se_trna)=="GtRNAdb-mature-tRNA_3_end_Match_Genome/mature-tRNA-Gly-GCC_3_end"),]
+df_tRNA_Gly_GCC_3_end <- data.frame(
+  sample = names(tRNA_Gly_GCC_3_end),
+  stress = ifelse(substr(names(tRNA_Gly_GCC_3_end), 1, 1)=="C", "ctrl", "stress"),
+  PROTAC = ifelse(substr(names(tRNA_Gly_GCC_3_end), nchar(names(tRNA_Gly_GCC_3_end)), nchar(names(tRNA_Gly_GCC_3_end)))=="D", "DMSO", "PROTAC"),
+  count = tRNA_Gly_GCC_3_end
+)
+df_tRNA_Gly_GCC_3_end$group <- factor(paste0(df_tRNA_Gly_GCC_3_end$stress, "_", df_tRNA_Gly_GCC_3_end$PROTAC))
+df_tRNA_Gly_GCC_3_end$donor <- gsub("[^0-9]", "", df_tRNA_Gly_GCC_3_end$sample)
+
+fig16c <- ggplot(data = df_tRNA_Gly_GCC_3_end, aes(x = group, y = count, fill = group)) + 
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, linewidth = 1.2)+
+  geom_point(size = 2.5, alpha = 0.8) +
+  geom_line(aes(group = donor), color = "grey50", alpha = 0.8, linewidth = 1.5) +
+  scale_fill_manual(values=c("seashell2","seashell4","#ffa500ff","tomato3"))+
+  theme_bw() +
+  labs(x = "Group", y = "Corrected value",  title = "tRNA Gly-GCC-3-end\nTop1 in PROTAC vs. DMSO") +
+  theme(axis.text = element_text(size=16),
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=16),
+        legend.title = element_text(size = 18),
+        legend.key.size = unit(1.5, "cm"),
+        panel.border = element_rect(colour = "grey", fill = NA, linewidth = 2)
+  )
+
+fig16c
+```
+
+# fig 16d
+
+top2: tRNA_Leu_CAG_5_end
+
+```{r}
+tRNA_Leu_CAG_5_end <- assay(se_trna, "corrected")[which(rownames(se_trna)=="GtRNAdb-mature-tRNA_5_end_Match_Genome/mature-tRNA-Leu-CAG_5_end"),]
+df_tRNA_Leu_CAG_5_end <- data.frame(
+  sample = names(tRNA_Leu_CAG_5_end),
+  stress = ifelse(substr(names(tRNA_Leu_CAG_5_end), 1, 1)=="C", "ctrl", "stress"),
+  PROTAC = ifelse(substr(names(tRNA_Leu_CAG_5_end), nchar(names(tRNA_Leu_CAG_5_end)), nchar(names(tRNA_Leu_CAG_5_end)))=="D", "DMSO", "PROTAC"),
+  count = tRNA_Leu_CAG_5_end
+)
+df_tRNA_Leu_CAG_5_end$group <- factor(paste0(df_tRNA_Leu_CAG_5_end$stress, "_", df_tRNA_Leu_CAG_5_end$PROTAC))
+df_tRNA_Leu_CAG_5_end$donor <- gsub("[^0-9]", "", df_tRNA_Leu_CAG_5_end$sample)
+
+
+fig16d <- ggplot(data = df_tRNA_Leu_CAG_5_end, aes(x = group, y = count, fill = group)) + 
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, linewidth = 1.2)+
+  geom_point(size = 2.5, alpha = 0.8) +
+  geom_line(aes(group = donor), color = "grey50", alpha = 0.8, linewidth = 1.5) +
+  scale_fill_manual(values=c("seashell2","seashell4","#ffa500ff","tomato3"))+
+  theme_bw() +
+  labs(x = "Group", y = "Corrected value",  title = "tRNA Leu-CAG-5-end\nTop2 in PROTAC vs. DMSO") +
+  theme(axis.text = element_text(size=16),
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=16),
+        legend.title = element_text(size = 18),
+        legend.key.size = unit(1.5, "cm"),
+        panel.border = element_rect(colour = "grey", fill = NA, linewidth = 2)
+  )
+fig16d
+
+```
+
+# fig 16e
+
+top3: tRNA_Leu_AAG_3_end
+```{r}
+tRNA_Leu_AAG_3_end <- assay(se_trna, "corrected")[which(rownames(se_trna)=="GtRNAdb-mature-tRNA_3_end_Match_Genome/mature-tRNA-Leu-AAG_3_end"),]
+
+df_tRNA_Leu_AAG_3_end <- data.frame(
+  sample = names(tRNA_Leu_AAG_3_end),
+  stress = ifelse(substr(names(tRNA_Leu_AAG_3_end), 1, 1)=="C", "ctrl", "stress"),
+  PROTAC = ifelse(substr(names(tRNA_Leu_AAG_3_end), nchar(names(tRNA_Leu_AAG_3_end)), nchar(names(tRNA_Leu_AAG_3_end)))=="D", "DMSO", "PROTAC"),
+  count = tRNA_Leu_AAG_3_end
+)
+df_tRNA_Leu_AAG_3_end$group <- factor(paste0(df_tRNA_Leu_AAG_3_end$stress, "_", df_tRNA_Leu_AAG_3_end$PROTAC))
+df_tRNA_Leu_AAG_3_end$donor <- gsub("[^0-9]", "", df_tRNA_Leu_AAG_3_end$sample)
+
+fig16e <- ggplot(data = df_tRNA_Leu_AAG_3_end, aes(x = group, y = count, fill = group)) + 
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, linewidth = 1.2)+
+  geom_point(size = 2.5, alpha = 0.8) +
+  geom_line(aes(group = donor), color = "grey50", alpha = 0.8, linewidth = 1.5) +
+  scale_fill_manual(values=c("seashell2","seashell4","#ffa500ff","tomato3"))+
+  theme_bw() +
+  labs(x = "Group", y = "Corrected value",  title = "tRNA Leu-AAG-3-end\nTop3 in PROTAC vs. DMSO") +
+  theme(axis.text = element_text(size=16),
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=16),
+        legend.title = element_text(size = 18),
+        legend.key.size = unit(1.5, "cm"),
+        panel.border = element_rect(colour = "grey", fill = NA, linewidth = 2)
+  )
+
+fig16e
+
+```

@@ -1,0 +1,450 @@
+---
+title: "FINAL embryo H3K4me3"
+output: html_document
+author: "Bohan Zhang"
+date: "2026-06-04"
+---
+
+```{r}
+suppressPackageStartupMessages({
+library(AnnotationHub)
+library(rtracklayer)
+library(easylift)
+library(MotifDb)
+library(Rsamtools)
+library(memes)
+library(rGREAT)
+library(MotifDb)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(SummarizedExperiment)
+library(SEtools)
+library(sechm)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(TFBSTools)
+library(RColorBrewer)
+library(universalmotif)
+library(viridis)
+library(cowplot)
+library(epiwraps)
+  library(chromVAR)
+  library(edgeR)
+  library(motifmatchr)
+  library(org.Mm.eg.db)
+  library(clusterProfiler)
+  library(GenomeInfoDb)
+  library(lme4)
+  library(multcomp)
+  })
+set.seed(123)
+ah <- AnnotationHub()
+setwd("/mnt/gapp/work/bohan/H3K4me3_embryo")
+```
+
+# general data prep
+
+```{r}
+bwfiles <- c(
+  "/mnt/gapp/internData/2025_iryna_EXPX_CutNTag_2cellEmbryo_IFS/output_2_replicates/bamCoverage/20251006_01_WF_2_cell_cuttag_H3K4me1_control_rep1.filtered.seq_depth_norm.bw",
+  "/mnt/gapp/internData/2025_iryna_EXPX_CutNTag_2cellEmbryo_IFS/output_2_replicates/bamCoverage/20251006_02_WF_2_cell_cuttag_H3K4me1_control_rep2.filtered.seq_depth_norm.bw",
+  "/mnt/gapp/internData/2025_iryna_EXPX_CutNTag_2cellEmbryo_IFS/output_2_replicates/bamCoverage/20251006_03_WF_2_cell_cuttag_H3K4me1_stress_rep1.filtered.seq_depth_norm.bw",
+  "/mnt/gapp/internData/2025_iryna_EXPX_CutNTag_2cellEmbryo_IFS/output_2_replicates/bamCoverage/20251006_04_WF_2_cell_cuttag_H3K4me1_stress_rep2.filtered.seq_depth_norm.bw"
+)
+# Sample grouping:
+group <- factor(c("control", "control", "stress", "stress"), levels = c("control", "stress"))
+names(bwfiles) <- c("control_1", "control_2", "stress_1", "stress_2")
+
+bam_files <- c(
+"/mnt/gapp/internData/2025_iryna_EXPX_CutNTag_2cellEmbryo_IFS/output_2_replicates/filtered_bam/20251006_01_WF_2_cell_cuttag_H3K4me1_control_rep1.filtered.bam",
+"/mnt/gapp/internData/2025_iryna_EXPX_CutNTag_2cellEmbryo_IFS/output_2_replicates/filtered_bam/20251006_02_WF_2_cell_cuttag_H3K4me1_control_rep2.filtered.bam",
+"/mnt/gapp/internData/2025_iryna_EXPX_CutNTag_2cellEmbryo_IFS/output_2_replicates/filtered_bam/20251006_03_WF_2_cell_cuttag_H3K4me1_stress_rep1.filtered.bam",
+"/mnt/gapp/internData/2025_iryna_EXPX_CutNTag_2cellEmbryo_IFS/output_2_replicates/filtered_bam/20251006_04_WF_2_cell_cuttag_H3K4me1_stress_rep2.filtered.bam"
+)
+bam_list <- BamFileList(bam_files, yieldSize = 1000000)
+ah <- AnnotationHub()
+
+
+# merged narrow peaks
+
+# peaks produced by: macs3 callpeak -f BAMPE -t merged_filtered_sorted.bam -g mm -q 0.05
+peaks <- import("/mnt/gapp/work/bohan/H3K4me3_embryo/peak_calling_merge/merged_filtered_peak_peaks.narrowPeak")
+peaks <- keepStandardChromosomes(peaks, pruning.mode = "coarse") #always remember to filter out the non-standard chromosomes
+summary(width(peaks))
+```
+
+
+# Fig 8a
+
+H3K4me3 signal in embryo accessible sites
+
+```{r}
+embryo_consensus <- import("/mnt/gapp/work/vincent/Non_project_related/Students/Bohan/ObjectsForBohan/embryo_consensus.bed", format = "bed")  # 4485 peaks
+embryo_consensus <- keepStandardChromosomes(embryo_consensus, pruning.mode = "coarse")
+seqlevelsStyle(embryo_consensus) <-"UCSC"
+genome(embryo_consensus) <- "mm39"
+embryo_consensus <- easylift(embryo_consensus, "mm10")
+seqlevelsStyle(embryo_consensus) <-"Ensembl"
+
+sm_fig8a <- signal2Matrix(bwfiles, regions = embryo_consensus, w = 50)
+colnames(sm_fig8a)
+sm_fig8a_plot <- sm_fig8a
+colnames(sm_fig8a_plot) <- c(" ","  ","   ","    ") # use different spaces to avoid error during plotting
+
+# pdf("fig8a.pdf")
+hm8a <- plotEnrichedHeatmaps(sm_fig8a_plot, trim = c(0.02, 0.98),
+                                use_raster = TRUE,raster_quality = 2)
+fig8a <- grid.grabExpr({draw(hm8a, column_title = "H3K4me3 signal in embryo accessible sites", 
+                             column_title_gp = gpar(fontsize = 24, fontface = "bold", hjust = 0.5))
+                        grid.text("control", x = 0.25, y = 0.95, gp = gpar(fontsize = 20))
+                        grid.text("stress",  x = 0.69, y = 0.95, gp = gpar(fontsize = 20))
+})
+# dev.off()
+```
+
+# fig 8b
+
+H3K4me3 peaks
+
+```{r}
+sm_fig8b <- signal2Matrix(bwfiles, regions = peaks, w = 50)
+colnames(sm_fig8b)
+sm_fig8b_plot <- sm_fig8b
+colnames(sm_fig8b_plot) <- c(" ","  ","   ","    ") # use different spaces to avoid error during plotting
+
+pdf("fig8b.pdf")
+hm8b <- plotEnrichedHeatmaps(sm_fig8b_plot, trim = c(0.02, 0.98),
+                                use_raster = TRUE,raster_quality = 2)
+fig8b <- grid.grabExpr({draw(hm8b, column_title = "H3K4me3 peaks", 
+                             column_title_gp = gpar(fontsize = 24, fontface = "bold", hjust = 0.5))
+                        grid.text("control", x = 0.25, y = 0.95, gp = gpar(fontsize = 20))
+                        grid.text("stress",  x = 0.69, y = 0.95, gp = gpar(fontsize = 20))
+})
+dev.off()
+```
+
+# fig8c
+
+H3K4me3 peaks containing GRE
+
+we check which peaks contain the GRE motif (by FIMO):
+
+```{r}
+# get the sequence of the peaks
+seqlevelsStyle(peaks) <- "UCSC"
+seq_peaks <- peaks %>% get_sequence(BSgenome.Mmusculus.UCSC.mm10)
+names(seq_peaks)[1:2]  # the granges are kept in the names
+
+getNonRedundantMotifs <- function(){
+  motifs <- MotifDb::query(MotifDb::MotifDb, c("Mmusculus","HOCOMOCO"))
+  modf <- data.frame(row.names=names(motifs),
+                     TF=gsub("^Mmusculus-HOCOMOCOv10-|_MOUSE.+","",names(motifs)),
+                     grade=gsub(".+\\.","",names(motifs)))
+  modf <- modf[order(modf$TF,modf$grade),]
+  modf <- modf[!duplicated(modf$TF),]
+  setNames(universalmotif::convert_motifs(motifs[row.names(modf)]), modf$TF)
+}
+
+# prepare the motif
+motifs <- getNonRedundantMotifs()
+motif_GCR <- motifs$GCR
+
+#run FIMO 
+gre_in_peak <- runFimo(seq_peaks, convert_motifs(motif_GCR), meme_path = "/opt/miniconda3/bin")  #p value threshold: 1e-04 (by default)   1078 peaks containing GRE
+seqlevelsStyle(gre_in_peak) <- "Ensembl"
+```
+
+
+```{r}
+sm_fig8c <- signal2Matrix(bwfiles, regions = gre_in_peak, w = 50)
+colnames(sm_fig8c)
+sm_fig8c_plot <- sm_fig8c
+colnames(sm_fig8c_plot) <- c(" ","  ","   ","    ") # use different spaces to avoid error during plotting
+
+# pdf("fig8c.pdf")
+hm8c <- plotEnrichedHeatmaps(sm_fig8c_plot, trim = c(0.02, 0.98),
+                                use_raster = TRUE,raster_quality = 2)
+fig8c <- grid.grabExpr({draw(hm8c, column_title = "H3K4me3 peaks containing GRE", 
+                             column_title_gp = gpar(fontsize = 24, fontface = "bold", hjust = 0.5))
+                        grid.text("control", x = 0.25, y = 0.95, gp = gpar(fontsize = 20))
+                        grid.text("stress",  x = 0.69, y = 0.95, gp = gpar(fontsize = 20))
+})
+# dev.off()
+```
+
+# fig8d
+
+Peak fat4
+
+```{r}
+# counts <- regionCounts(bam_list, peaks)
+# rownames(counts) <- paste0(counts@rowRanges@seqnames, ":", counts@rowRanges@ranges)
+# saveRDS(counts, "./DEA/newPeaks_counts_standardchr.rds")
+# counts <- readRDS("./DEA/newPeaks_counts_standardchr.rds")
+# top <- get_DEA(assay(counts), group = group)
+# top$table
+# write.csv(top$table, "./DEA/DEA_newPeaks_standardchr.csv")
+
+# the step above is the DEA. now we use the result
+toptable <- read.csv("./DEA/DEA_newPeaks_standardchr.csv")
+rownames(toptable) <- toptable$X
+toptable$X <- NULL
+
+sig_peak_narrow_merge_all <- toptable[toptable$PValue<0.05, ]
+# to use plotSignalTracks(), we need the ensdb obj first (UCSC is not working)
+# the peaks are in mm10. So we need a mm10/GRCm38 reference genome
+# AnnotationHub::query(ah, pattern=c("GRCm38"))
+genome <- ah[["AH89211"]]
+
+```
+
+```{r}
+i <- 1
+# pdf(paste0("fig8d.pdf"), width = 7, height = 5)
+fig8d <- grid.grabExpr({plotSignalTracks(files = list(control=bwfiles[c(1,2)],stress =bwfiles[c(3,4)]),
+                 overlay.alpha = 75,
+                 region = rownames(sig_peak_narrow_merge_all)[i],
+                 aggregation = "overlay",
+                 colors = c("darkgrey","orange"),
+                 genomeAxis = T,
+                 ensdb = genome,
+                 extend = c(10000,10000),
+                 ylim= c(0,350), 
+                 fontface.main = 1,
+                 cex.main = 1.2,
+                 cex.id = 2,
+                 cex.title = 1.5,
+                 cex.axis = 1.5,
+                 cex.gen = 1.5,
+                 cex.group = 1.2,
+                 col.group = "black",
+                 cex = 1.2)
+  grid.text(paste0("Peak: chr", rownames(sig_peak_narrow_merge_all)[i]), x = 0.5, y = 0.95, gp = gpar(fontsize = 24, fontface = "bold"))
+})
+# dev.off()
+```
+
+# fig8e
+
+```{r}
+i <- 2
+# pdf(paste0("fig8e.pdf"), width = 7, height = 5)
+fig8e <- grid.grabExpr({plotSignalTracks(files = list(control=bwfiles[c(1,2)],stress =bwfiles[c(3,4)]),
+                 overlay.alpha = 75,
+                 region = rownames(sig_peak_narrow_merge_all)[i],
+                 aggregation = "overlay",
+                 colors = c("darkgrey","orange"),
+                 genomeAxis = T,
+                 ensdb = genome,
+                 genome = " ", # hide the genome name for this plot
+                 extend = c(10000,10000),
+                 ylim= c(0,350), 
+                 fontface.main = 1,
+                 cex.main = 1.2,
+                 cex.id = 2,
+                 cex.title = 1.5,
+                 cex.axis = 1.5,
+                 cex.gen = 1.5,
+                 cex.group = 1.2,
+                 col.group = "black",
+                 cex = 1.2)
+  grid.text(paste0("Peak: chr", rownames(sig_peak_narrow_merge_all)[i]), x = 0.5, y = 0.95, gp = gpar(fontsize = 24, fontface = "bold"))
+})
+# dev.off()
+```
+
+# fig8f
+
+```{r}
+i <- 3
+# pdf(paste0("fig8f.pdf"), width = 7, height = 5)
+fig8f <- grid.grabExpr({plotSignalTracks(files = list(control=bwfiles[c(1,2)],stress =bwfiles[c(3,4)]),
+                 overlay.alpha = 75,
+                 region = rownames(sig_peak_narrow_merge_all)[i],
+                 aggregation = "overlay",
+                 colors = c("darkgrey","orange"),
+                 genomeAxis = T,
+                 ensdb = genome,
+                 genome = " ", # hide the genome name for this plot
+                 extend = c(10000,10000),
+                 ylim= c(0,350), 
+                 fontface.main = 1,
+                 cex.main = 1.2,
+                 cex.id = 2,
+                 cex.title = 1.5,
+                 cex.axis = 1.5,
+                 cex.gen = 1.5,
+                 cex.group = 1.2,
+                 col.group = "black",
+                 cex = 1.2)
+  grid.text(paste0("Peak: chr", rownames(sig_peak_narrow_merge_all)[i]), x = 0.5, y = 0.95, gp = gpar(fontsize = 24, fontface = "bold"))
+})
+# dev.off()
+```
+
+# fig 9  
+
+motif activity analysis
+
+```{r}
+arche <- read_meme(file = "/mnt/gapp/work/vincent/tools/consensus_pwms.meme") ### file is from https://resources.altius.org/~jvierstra/projects/motif-clustering-v2.0beta/consensus_pwms.meme
+arche2 <- do.call(what = "PFMatrixList", lapply(arche, class="TFBSTools-PFMatrix", FUN= convert_motifs)) 
+arche2[[1]]@ID 
+
+names <- sapply(1:length(arche2),function(i){
+  names(arche2[i]) <- arche2[[i]]@ID 
+})
+names(arche2) <- names
+```
+
+genome
+
+```{r}
+genome2 <- Rsamtools::FaFile("/reference/Mus_musculus/Ensembl/GRCm38/Sequence/WholeGenomeFasta/Mus_musculus.GRCm38.dna_sm.primary_assembly.fa")
+```
+
+```{r}
+se <- readRDS("/mnt/gapp/work/vincent/Non_project_related/Students/Bohan/new_counts/e2c_H3K4me3_Resized300.SE.rds")
+rownames(se) <- as.character(granges(se))
+se <- se[!grepl(x = names(se),pattern = "GL|JH|MU"),] # we remove non-standard chroms
+colnames(se)
+se$Condition <- (c("Ctrl","Ctrl","Stress","Stress"))
+
+dds <- calcNormFactors(DGEList(assay(se))) # this calculates Normalization factors according to library sequencing depth, this is important since depth can vary greatly between 
+assays(se)$logcpm <- log1p(edgeR::cpm(dds)) # generates the log of Counts-per-million (CPM), this is a very standardized way to normalize data used then for analysis or 
+mm <- model.matrix(~Condition, data=as.data.frame(colData(se))); mm 
+se <- se[row.names(dds),]
+se <- addGCBias(se, genome=genome2) # se from DEA analysis
+
+IC <- lapply(arche,function(x){
+  x@icscore
+})
+median(unlist(IC))
+arche3 <- names(arche2)
+arche3_names <- gsub(pattern = "AC....\\:",replacement = "",x = arche3)
+keep <- unlist(IC) == tapply(unlist(IC), arche3_names, max)[arche3_names]
+unlist(arche3_names)
+arche2_filtIC <- arche2[keep]
+#we filter for median 
+arche2_filtmedian <- arche2[unlist(IC)>median(unlist(IC)),]
+
+arche2_filterboth <- arche2[unlist(IC)>median(unlist(IC))& keep,]
+
+# compute deviations
+set.seed(123)
+single_motifs <- do.call(what = "PFMatrixList", lapply(arche2_filterboth, class="TFBSTools-PFMatrix", FUN= convert_motifs)) #old way and new with mouse hocomocov11 changed to lapply(motifs) 
+motif_ix <- matchMotifs(single_motifs, se, genome=genome2)
+# dev <- epiwraps::computeDeviationsFaster(counts=assay(se), motifMatches =motif_ix, backgrounds   = getBackgroundPeaks(se,rowData(se)$bias,niterations = 5000))
+# colData(dev) <- colData(se)
+dev2 <- betterChromVAR::betterChromVAR(object = se, annotations = motif_ix)
+
+# z
+dev2 <- dev2[!is.na(rowSums2(assays(dev2)$z)),]
+set.seed(123)
+dev2 <- SEtools::svacor(dev2,~Condition,n.sv = 1,assayName = "z",method = "sva") # svacor suggest 3
+
+dev2$Condition <- as.factor(dev2$Condition)
+
+mm <- model.matrix(~Condition, data=as.data.frame(colData(dev2))); mm 
+
+fit <- limma::lmFit(assays(dev2)$z, mm,weights=sqrt(rowData(dev2)$N))
+fit <- eBayes(fit)
+Results <- as.data.frame(topTable(fit = fit,coef = c(2),number = Inf));Results
+Results$archetype <- gsub(pattern = "AC....\\:",replacement = "",x = rownames(Results))
+Results <- Results[!duplicated(Results$archetype),]
+
+mm <- model.matrix(~Condition+SV1, data=as.data.frame(colData(dev2))); mm 
+
+fit <- limma::lmFit(assays(dev2)$z, mm,weights=sqrt(rowData(dev2)$N))
+fit <- eBayes(fit)
+Results <- as.data.frame(topTable(fit = fit,coef = c(2),number = Inf));Results
+Results$archetype <- gsub(pattern = "AC....\\:",replacement = "",x = rownames(Results))
+Results <- Results[!duplicated(Results$archetype),]
+
+```
+
+
+```{r}
+res <- Results
+res$size <- ifelse(res$adj.P.Val < 0.05, 2.5, 1.5)
+fig9 <- ggplot(res, aes(logFC, -log10(adj.P.Val), colour=adj.P.Val<0.05)) + 
+    geom_point(size = res$size) + 
+    geom_text_repel(data = res[res$adj.P.Val < 0.05,],aes(label =res$archetype[res$adj.P.Val < 0.05]),size = 8, max.overlaps = 20,)+
+    scale_color_manual(values=c("TRUE"="orange", "FALSE"="black"))+
+    geom_hline(yintercept=-log10(0.05), linetype="dashed", linewidth = 1.2)+
+    annotate(geom = "text", x = -0.25, y =-log10(0.05)-0.1, label = "adj.P.Val = 0.05", size = 8)+
+    theme_bw()+
+    theme(legend.position = "none",
+          axis.text = element_text(size = 20),  # Adjust the size as needed
+          axis.title = element_text(size = 20),
+           plot.title = element_text(size = 24, hjust = 0.5, face = "bold") )+
+    labs(x = "logFC of z-score", title = "TF motif archetype activity\nat H3K4me3 bound sites\nin embryos of stress vs. control sires")
+fig9
+# ggsave("fig9.pdf", fig9, width = 8, height = 8)
+```
+
+# fig10a
+
+H3K4me3 peaks in sperm accessible sites
+
+```{r}
+roi_acc_all <- readRDS("/mnt/gapp/work/vincent/Non_project_related/AnnForBen/narrow_consensus.peaks_sperm.rds")
+seqlevelsStyle(roi_acc_all) <-"UCSC"
+genome(roi_acc_all) <- "mm39"
+roi_acc_all <- easylift(roi_acc_all, "mm10")
+seqlevelsStyle(roi_acc_all) <-"Ensembl"
+
+seqlevelsStyle(peaks) <-"Ensembl"
+peaks <- resize(peaks, width = 380, fix = "center")  #roughly the median of the width
+share_acc_all <- peaks[overlapsAny(peaks, roi_acc_all),]  # 1719 peaks
+
+
+sm_fig10a <- signal2Matrix(bwfiles, regions = share_acc_all, w = 50)
+colnames(sm_fig10a)
+sm_fig10a_plot <- sm_fig10a
+colnames(sm_fig10a_plot) <- c(" ","  ","   ","    ") # use different spaces to avoid error during plotting
+
+# pdf("fig10a.pdf")
+hm10a <- plotEnrichedHeatmaps(sm_fig10a_plot, trim = c(0.02, 0.98),
+                                use_raster = TRUE,raster_quality = 2)
+fig10a <- grid.grabExpr({draw(hm10a, column_title = "H3K4me3 peaks in\nsperm accessible sites", 
+                             column_title_gp = gpar(fontsize = 24, fontface = "bold", hjust = 0.5))
+                        grid.text("control", x = 0.25, y = 0.89, gp = gpar(fontsize = 20))
+                        grid.text("stress",  x = 0.69, y = 0.89, gp = gpar(fontsize = 20))
+})
+# dev.off()
+```
+
+# fig10b
+
+H3K4me3 peaks in sperm accessible sites containing GRE
+
+```{r}
+roi_gre <- readRDS("/mnt/gapp/work/vincent/Non_project_related/AnnForBen/narrow_peaks_with_GRE_sperm.rds")
+chain <- "/mnt/gapp/work/vincent/tools/liftOver/mm39ToMm10.over.chain"
+bfc <- BiocFileCache()
+if(nrow(bfcquery(bfc, basename(chain)))==0){bfcadd(bfc, chain)}
+seqlevelsStyle(roi_gre) <-"UCSC"
+genome(roi_gre) <- "mm39"
+roi_gre <- easylift(roi_gre, "mm10")
+seqlevelsStyle(roi_gre) <-"Ensembl"
+
+peaks <- resize(peaks, width = 380, fix = "center")  #roughly the median of the width
+share_acc_gre <- peaks[overlapsAny(peaks, roi_gre),]  # 90peaks
+
+
+sm_fig10b <- signal2Matrix(bwfiles, regions = share_acc_gre, w = 50)
+colnames(sm_fig10b)
+sm_fig10b_plot <- sm_fig10b
+colnames(sm_fig10b_plot) <- c(" ","  ","   ","    ") # use different spaces to avoid error during plotting
+
+# pdf("fig10b.pdf")
+hm10b <- plotEnrichedHeatmaps(sm_fig10b_plot, trim = c(0.02, 0.98),
+                                use_raster = TRUE,raster_quality = 2)
+fig10b <- grid.grabExpr({draw(hm10b, column_title = "H3K4me3 peaks in\nsperm accessible sites with GRE motif", 
+                             column_title_gp = gpar(fontsize = 24, fontface = "bold", hjust = 0.5))
+                        grid.text("control", x = 0.25, y = 0.89, gp = gpar(fontsize = 20))
+                        grid.text("stress",  x = 0.69, y = 0.89, gp = gpar(fontsize = 20))
+})
+# dev.off()
+```

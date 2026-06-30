@@ -1,0 +1,608 @@
+---
+title: "Sperm Long RNA Analysis"
+output: html_document
+author: "Bohan Zhang"
+date: "2026-06-03"
+---
+
+```{r setup}
+library(edgeR)
+library(SummarizedExperiment)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggplot2)
+library(limma)
+library(ComplexHeatmap)
+library(sechm)
+library(decoupleR)
+library(tidyr)
+library(rtracklayer)
+library(epiwraps)
+library(variancePartition)
+library(BiocParallel)
+library(openxlsx)
+library(ggpubr)
+library(emmeans)
+library(GenomicFeatures)
+library(txdbmaker)
+library(AnnotationHub)
+library(GenomeInfoDb)
+library(memes)
+library(ggrepel)
+library(cowplot)
+library(patchwork)
+library(magick)
+library(cluster)
+library(ggsignif)
+library(ggplotify)
+ah <- AnnotationHub()
+setwd("/mnt/gapp/work/bohan/thesis/IFS_sperm_longRNA")
+```
+
+# 1. DEA with 2 SVs
+
+```{r}
+se <- readRDS("2026_iryna_EXP4_bohan_IFS_PROTAC_longRNA.SE.SV2.rds")
+metadata(se)$anno_colors <- list(
+  stress=c(ctrl="steelblue", ifs ="firebrick3"), 
+  protac = c(PROTAC = "orange2", DMSO = "navy"),
+  group = c("ctrl_DMSO" = "seashell2", "ifs_DMSO" =  "#ffa500ff" , "ctrl_PROTAC" = "seashell4" , "ifs_PROTAC" = "tomato3"))
+
+
+dge_for_filter <- DGEList(assay(se, "counts"))
+dge_for_filter <- calcNormFactors(dge_for_filter)
+design_for_filter <- model.matrix(~ 0 + group, data = as.data.frame(colData(se)))
+# Filter using the temporary design matrix
+keep <- filterByExpr(dge_for_filter, min.count = 20, design = design_for_filter)
+se  <- se[keep, ]
+# add donor info
+colData(se)$donor <- sub("^(C[0-9]+|I[0-9]+)[DK]$", "\\1", colData(se)$sampleid)
+colData(se)$donor <- factor(colData(se)$donor)
+
+# voom
+dge <- DGEList(assay(se, "counts"))
+dge <- calcNormFactors(dge)
+design <- model.matrix(~ 0 + group + SV1 + SV2, data = as.data.frame(colData(se)))
+assay(se, "logcpm") <- log1p(edgeR::cpm(dge)[rownames(se),])
+
+# ── 2. First voom + first duplicateCorrelation pass ───────────────────────────
+vobj_for_dupcor <- voom(dge, design, plot = FALSE)
+dupcor <- duplicateCorrelation(vobj_for_dupcor, design, block = colData(se)$donor)
+
+# ── 3. Second voom pass, now informed by the donor correlation ─────────────────
+vobj <- voom(dge, design, plot = FALSE,
+             block       = colData(se)$donor,
+             correlation = dupcor$consensus)
+
+# ── 4. Second duplicateCorrelation pass on the better voom weights ─────────────
+dupcor <- duplicateCorrelation(vobj, design, block = colData(se)$donor)
+
+# ── 5. Fit the linear model ────────────────────────────────────────────────────
+fit <- lmFit(vobj, design, block=colData(se)$donor, correlation = dupcor$consensus)
+
+contrast <- makeContrasts(
+  total_stress_vs_ctrl  = (groupifs_DMSO + groupifs_PROTAC)/2 - (groupctrl_DMSO + groupctrl_PROTAC)/2,
+  DMSO_stress_vs_ctrl   = groupifs_DMSO - groupctrl_DMSO,
+  PROTAC_stress_vs_ctrl = groupifs_PROTAC - groupctrl_PROTAC,
+  total_PROTAC_vs_DMSO  = (groupifs_PROTAC + groupctrl_PROTAC)/2 - (groupifs_DMSO + groupctrl_DMSO)/2,
+  ctrl_PROTAC_vs_DMSO   = groupctrl_PROTAC - groupctrl_DMSO,
+  stress_PROTAC_vs_DMSO = groupifs_PROTAC - groupifs_DMSO,
+  interaction           = (groupifs_PROTAC - groupctrl_PROTAC) - (groupifs_DMSO - groupctrl_DMSO),
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2)  # Empirical Bayes smoothing of standard errors
+
+# extract each contrast table 
+rowData(se)$DEA.voom.total_stress_vs_ctrl <- topTable(fit2, coef = "total_stress_vs_ctrl", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.DMSO_stress_vs_ctrl <- topTable(fit2, coef = "DMSO_stress_vs_ctrl", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.PROTAC_stress_vs_ctrl <- topTable(fit2, coef = "PROTAC_stress_vs_ctrl", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.total_PROTAC_vs_DMSO <- topTable(fit2, coef = "total_PROTAC_vs_DMSO", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.ctrl_PROTAC_vs_DMSO <- topTable(fit2, coef = "ctrl_PROTAC_vs_DMSO", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.stress_PROTAC_vs_DMSO <- topTable(fit2, coef = "stress_PROTAC_vs_DMSO", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.interaction <- topTable(fit2, coef = "interaction", n = Inf)[rownames(se),]
+
+```
+
+## Fig 12A
+
+Heatmap of DEG result of SVA corrected expression
+
+```{r}
+results_total_stress_vs_ctrl <- rowData(se)$DEA.voom.total_stress_vs_ctrl
+sig_total_stress_vs_ctrl <- results_total_stress_vs_ctrl[results_total_stress_vs_ctrl$adj.P.Val<0.05,]
+table(sign(sig_total_stress_vs_ctrl$logFC))
+sig_total_stress_vs_ctrl <- rownames(sig_total_stress_vs_ctrl)
+table(rownames(se)==rownames(vobj$E)) # they have the same order
+assay(se, "voom.val") <- vobj$E
+```
+
+corrected value
+
+```{r} 
+# pdf("heatmap_sperm_longRNA_voomDEG_total_stress_vs_ctrl.pdf", width = 7, height = 7)
+fig12a <- sechm(se, 
+      sig_total_stress_vs_ctrl, 
+      assayName = "corrected",
+      top_annotation = c("stress", "protac"),
+      gaps_at = c("stress"),
+      cluster_rows = TRUE,
+      do.scale = TRUE,
+      column_title = "Heatmap of SVA corrected value", 
+      column_title_gp = gpar(fontsize = 18, fontface = "bold"),
+      show_annotation_legend = FALSE,
+      show_heatmap_legend = FALSE,
+      use_raster = TRUE)
+# draw(fig12a)
+# dev.off()
+fig12a <- grid::grid.grabExpr(draw(fig12a))
+```
+
+## Fig 12B
+
+volcano plot of DEA result of SVA corrected expression
+
+```{r}
+results_total_stress_vs_ctrl <- results_total_stress_vs_ctrl[order(results_total_stress_vs_ctrl$adj.P.Val),]
+results_total_stress_vs_ctrl$gene <- rownames(results_total_stress_vs_ctrl)
+
+results_total_stress_vs_ctrl$significance <- "non"
+results_total_stress_vs_ctrl$significance[results_total_stress_vs_ctrl$adj.P.Val < 0.05 & results_total_stress_vs_ctrl$logFC > 0] <- "up"
+results_total_stress_vs_ctrl$significance[results_total_stress_vs_ctrl$adj.P.Val < 0.05 & results_total_stress_vs_ctrl$logFC < 0] <- "down"
+
+top5updown <- rbind(
+  head(results_total_stress_vs_ctrl[results_total_stress_vs_ctrl$significance == "up", ], 5),
+  head(results_total_stress_vs_ctrl[results_total_stress_vs_ctrl$significance == "down", ], 5)
+)
+
+fig12b <- ggplot(results_total_stress_vs_ctrl, aes(x = logFC, y = -log10(adj.P.Val), label = gene, color = significance)) +
+  geom_point() +
+  geom_text_repel(
+    data = top5updown,
+    size = 5,
+    max.overlaps  = 20,
+    box.padding   = 0.3,
+    color = "black"
+    ) +
+  scale_color_manual(values = c("up" = "red", "non" = "gray", "down" = "blue")) +
+  labs(x = "logFC Stress vs. Ctrl", y = "-log10(Padj)", title = "Volcano plot of sperm long RNA DEG result") +
+  theme_bw()+
+  theme(
+    axis.title = element_text(size = 18),
+    axis.text  = element_text(size = 16),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.text  = element_text(size = 16),
+    legend.title = element_text(size = 16)
+  )
+fig12b
+
+# ggsave("./plot_for_thesis/volcano_sperm_long_voomDEG_total_stress_vs_ctrl.pdf", fig12b, width = 7, height = 7)
+```
+
+## Fig 12c
+
+logcpm (uncorrected value)
+
+```{r}
+# for thesis
+# pdf("heatmap_sperm_longRNA_logcpm_voomDEG_total_stress_vs_ctrl.pdf", width = 7, height = 7)
+fig12c <- sechm(se, 
+      sig_total_stress_vs_ctrl, 
+      assayName = "logcpm",
+      top_annotation = c("stress", "protac"),
+      gaps_at = c("stress"),
+      cluster_rows = TRUE,
+      do.scale = TRUE,
+      use_raster = TRUE,
+      column_title = "Heatmap of logcpm (uncorrected value)",
+      column_title_gp = gpar(fontsize = 18, fontface = "bold"))
+# draw(fig12c)
+# dev.off()
+
+fig12c <- grid::grid.grabExpr(draw(fig12c))
+```
+
+
+# 2. DEA without sva correction
+
+```{r}
+se <- readRDS("2026_iryna_EXP4_bohan_IFS_PROTAC_longRNA.SE.rds")
+
+metadata(se)$anno_colors <- list(
+  stress=c(ctrl="steelblue", ifs ="firebrick3"), 
+  protac = c(PROTAC = "orange2", DMSO = "navy"),
+  group = c("ctrl_DMSO" = "seashell2", "ifs_DMSO" =  "#ffa500ff" , "ctrl_PROTAC" = "seashell4" , "ifs_PROTAC" = "tomato3"))
+
+se$group <- factor(paste0(se$stress, "_", se$protac))
+
+dge_for_filter <- DGEList(assay(se, "counts"))
+dge_for_filter <- calcNormFactors(dge_for_filter)
+design_for_filter <- model.matrix(~ 0 + group, data = as.data.frame(colData(se)))
+# Filter using the temporary design matrix
+keep <- filterByExpr(dge_for_filter, min.count = 20, design = design_for_filter)
+se  <- se[keep, ]
+# add donor info
+colData(se)$donor <- sub("^(C[0-9]+|I[0-9]+)[DK]$", "\\1", colData(se)$sampleid)
+colData(se)$donor <- factor(colData(se)$donor)
+
+# voom
+dge <- DGEList(assay(se, "counts"))
+dge <- calcNormFactors(dge)
+design <- model.matrix(~ 0 + group, data = as.data.frame(colData(se)))
+
+# also calculate logcpm
+assay(se, "logcpm") <- log1p(edgeR::cpm(dge)[rownames(se),])
+
+# ── 2. First voom + first duplicateCorrelation pass ───────────────────────────
+vobj_for_dupcor <- voom(dge, design, plot = FALSE)
+dupcor <- duplicateCorrelation(vobj_for_dupcor, design, block = colData(se)$donor)
+
+# ── 3. Second voom pass, now informed by the donor correlation ─────────────────
+vobj <- voom(dge, design, plot = FALSE,
+             block       = colData(se)$donor,
+             correlation = dupcor$consensus)
+
+# ── 4. Second duplicateCorrelation pass on the better voom weights ─────────────
+dupcor <- duplicateCorrelation(vobj, design, block = colData(se)$donor)
+
+# ── 5. Fit the linear model ────────────────────────────────────────────────────
+fit <- lmFit(vobj, design, block=colData(se)$donor, correlation = dupcor$consensus)
+
+contrast <- makeContrasts(
+  total_stress_vs_ctrl  = (groupifs_DMSO + groupifs_PROTAC)/2 - (groupctrl_DMSO + groupctrl_PROTAC)/2,
+  DMSO_stress_vs_ctrl   = groupifs_DMSO - groupctrl_DMSO,
+  PROTAC_stress_vs_ctrl = groupifs_PROTAC - groupctrl_PROTAC,
+  total_PROTAC_vs_DMSO  = (groupifs_PROTAC + groupctrl_PROTAC)/2 - (groupifs_DMSO + groupctrl_DMSO)/2,
+  ctrl_PROTAC_vs_DMSO   = groupctrl_PROTAC - groupctrl_DMSO,
+  stress_PROTAC_vs_DMSO = groupifs_PROTAC - groupifs_DMSO,
+  interaction           = (groupifs_PROTAC - groupctrl_PROTAC) - (groupifs_DMSO - groupctrl_DMSO),
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2)  # Empirical Bayes smoothing of standard errors
+
+# extract each contrast table 
+rowData(se)$DEA.voom.total_stress_vs_ctrl <- topTable(fit2, coef = "total_stress_vs_ctrl", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.DMSO_stress_vs_ctrl <- topTable(fit2, coef = "DMSO_stress_vs_ctrl", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.PROTAC_stress_vs_ctrl <- topTable(fit2, coef = "PROTAC_stress_vs_ctrl", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.total_PROTAC_vs_DMSO <- topTable(fit2, coef = "total_PROTAC_vs_DMSO", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.ctrl_PROTAC_vs_DMSO <- topTable(fit2, coef = "ctrl_PROTAC_vs_DMSO", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.stress_PROTAC_vs_DMSO <- topTable(fit2, coef = "stress_PROTAC_vs_DMSO", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.interaction <- topTable(fit2, coef = "interaction", n = Inf)[rownames(se),]
+
+```
+
+## Fig 13A
+
+PROTAC effect on all GR binding long RNA in sperm 
+
+```{r}
+mmu_sig_rip_by_OmicsBridge <- read.xlsx("mmu_rip_gene_name.xlsx", colNames = FALSE)
+# calculate the logFC manually to avoid anything to do with SVA
+se <- log2FC(se, fromAssay = "logcpm", controls = se$protac == "DMSO", by = se$stress, isLog = TRUE)
+
+allGR_se <- se[rownames(se)%in% mmu_sig_rip_by_OmicsBridge$X1, ]
+# because here we calculate logFC(protac/dmso), and within the stress group. So here we can just use the avg logFC of all the protac samples as the final logFC for this gene
+df_allGR_logFC <- rowMeans(assay(allGR_se, "log2FC")[,allGR_se$protac=="PROTAC"])
+n_down <- sum(df_allGR_logFC<0)
+N <- length(df_allGR_logFC)
+binom.test(n_down, N, p = 0.5, alternative = "two.sided")
+# to plot the heatmap, use the normalization to donor
+allGR_se_for_heatmap <- allGR_se
+allGR_se_for_heatmap <- log2FC(allGR_se_for_heatmap, fromAssay = "logcpm", controls = allGR_se_for_heatmap$protac == "DMSO", by = allGR_se_for_heatmap$donor, isLog = TRUE)
+
+rowData(allGR_se_for_heatmap)$direction <- ifelse(df_allGR_logFC>0,yes = "up",no = "down")
+```
+
+```{r}
+# pdf("./plot_for_thesis/longRNA_PROTAC_effect.pdf", width=6, height=8)
+fig13a <- sechm(
+  allGR_se_for_heatmap[,allGR_se_for_heatmap$protac == "PROTAC"],
+  names(df_allGR_logFC),
+  assayName = "scaledLFC",
+  cluster_rows = F,
+  top_annotation = c("protac"),
+  # hmcols =colorRampPalette(c("blue", "black", "orange"))(101),
+  gaps_at = c("protac"),
+  gaps_row = "direction",
+  column_title = "PROTAC effect on GR binding long RNA", 
+  use_raster = TRUE,
+  column_title_gp = gpar(fontsize = 18, fontface = "bold"),
+  show_annotation_legend = FALSE
+  ) 
+# draw(fig13a)
+# dev.off()
+fig13a <- grid::grid.grabExpr(draw(fig13a))
+```
+
+## Fig 13B
+
+PROTAC effect on stress affected GR binding long RNA (punadj<0.01)
+
+```{r}
+semisig <- rowData(se)$DEA.voom.total_stress_vs_ctrl[rowData(se)$DEA.voom.total_stress_vs_ctrl$P.Value<0.01, ]
+GR_semisig <- intersect(rownames(semisig), mmu_sig_rip_by_OmicsBridge$X1) # 67
+
+se_semisig <- se[rownames(semisig),]  # 952 genes
+logFC_general <- rowMeans(assay(se_semisig, "log2FC")[,se_semisig$protac=="PROTAC"])
+p_general <- sum(logFC_general<0)/length(logFC_general)
+
+se_GR_semisig <- se[GR_semisig, ]  # 67
+df_se_GR_semisig_logFC <- rowMeans(assay(se_GR_semisig, "log2FC")[,se_GR_semisig$protac=="PROTAC"])
+n_down <- sum(df_se_GR_semisig_logFC<0)  # 60
+N <- length(df_se_GR_semisig_logFC)  # 67
+
+binom.test(n_down, N, p = p_general, alternative = "two.sided")
+
+```
+
+```{r}
+# pdf("./plot_for_thesis/longRNA_with_p0.01_PROTAC_effect.pdf", width=6, height=8)
+fig13b <- sechm(
+  allGR_se_for_heatmap[,allGR_se_for_heatmap$protac == "PROTAC"],
+  GR_semisig,
+  show_rownames = T,
+  assayName = "scaledLFC",
+  cluster_rows = F,
+  top_annotation = c("protac"),
+  sortRowsOn = colnames(allGR_se_for_heatmap[,allGR_se_for_heatmap$protac == "PROTAC"]),
+  gaps_row = "direction",
+  # hmcols =colorRampPalette(c("blue", "black", "orange"))(101),
+  column_title = "PROTAC effect on stress affected\nGR binding long RNA (p < 0.01)", 
+  use_raster = TRUE,
+  show_row_dend = FALSE,
+  row_names_gp = grid::gpar(fontsize = 12),
+  column_title_gp = gpar(fontsize = 18, fontface = "bold")
+  ) 
+# draw(fig13b)
+# dev.off()
+fig13b <- grid::grid.grabExpr(draw(fig13b))
+```
+
+# 3. check if the GR binders have GRE in their promoters
+
+```{r}
+semisig <- rowData(se)$DEA.voom.total_stress_vs_ctrl[rowData(se)$DEA.voom.total_stress_vs_ctrl$P.Value<0.01, ]
+mmu_sig_rip_by_OmicsBridge <- read.xlsx("mmu_rip_gene_name.xlsx", colNames = FALSE)
+mmu_sig_rip_by_OmicsBridge <- mmu_sig_rip_by_OmicsBridge[!duplicated(mmu_sig_rip_by_OmicsBridge$X1),]
+mmu_sig_rip_by_OmicsBridge <- mmu_sig_rip_by_OmicsBridge[mmu_sig_rip_by_OmicsBridge %in% rownames(se)]
+
+GRbindingRNA_sig <- intersect(mmu_sig_rip_by_OmicsBridge, rownames(semisig))
+
+# # extract the promoters
+# genome <- ah[["AH89457"]]        # EnsDb for Ensembl, GRCm39
+# txs <- transcripts(genome)        # Extract all transcripts
+# txs <- keepStandardChromosomes(txs, pruning.mode = "coarse")  # Remove non-standard contigs
+# txs <- dropSeqlevels(txs, "MT", pruning.mode = "coarse")      # Remove mitochondrial genes
+# seqnames(txs)
+
+# # Get promoters
+# proms <- promoters(txs, upstream = 1000, downstream = 100)
+
+# seqlevelsStyle(proms)
+# seqlevelsStyle(proms) <- "Ensembl"
+
+# # Get GRE motif
+# genome <- ah[["AH90965"]]. # TwoBitFile object
+
+# GRE_motif <- MotifDb::MotifDb %>% 
+#   MotifDb::query("GRE") %>% 
+#   universalmotif::convert_motifs() %>% 
+#   .[[1]]
+
+# prom_seqs <- get_sequence(proms, genome)
+# fimo <- runFimo(prom_seqs, GRE_motif, meme_path = "/common/meme/bin")
+
+# GRE_proms <- proms[overlapsAny(proms, fimo)]
+
+# all above can be replaced by 
+GRE_proms <- readRDS("/mnt/gapp/work/miriam/EXP14_accessibility_sperm_embryo/rds_saves/GRE_promoters.rds")
+
+# add symbol ID
+library(org.Mm.eg.db)
+symbols <- mapIds(
+  org.Mm.eg.db,
+  keys    = GRE_proms$gene_id,
+  column  = "SYMBOL",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+GRE_proms$symbol <- symbols[GRE_proms$gene_id]
+
+GRbindingRNA_all_GRE_promoter <- intersect(GRE_proms$symbol, mmu_sig_rip_by_OmicsBridge)
+# 671 genes in total 
+
+GRbindingRNA_sig_GRE_promoter <- intersect(GRE_proms$symbol, GRbindingRNA_sig)
+# [1] "Retreg2" "Atg9a"   "Asb1"    "Mbd3"   
+# [5] "Git1"    "Tex14"   "Rnf44"   "Sorbs3" 
+# [9] "Foxred2" "Elfn2"   "Espl1"   "Syngap1"
+# [13] "Ddx11"   "Tpgs2"   "Fam229a" "Wdtc1"  
+# [17] "Spata21" "Stag3"   "Cpa5"    "Bcl2l14"
+# [21] "Egln2"   "Yif1b"   "Gpi1"    "Ptdss2" 
+# [25] "Got2"    "Pde4a"   "Gramd2a" "Pcbp4"  
+
+GRbindingRNA_sig_GRE_promoter_DEA <- semisig[GRbindingRNA_sig_GRE_promoter, ]
+# write.xlsx(GRbindingRNA_sig_GRE_promoter_DEA, "GRbindingRNA_sig_GRE_promoter_DEA.xlsx")
+```
+
+# 4. check if the DEGs express only in brain and testis, but not elsewhere
+
+```{r}
+mgi <- readRDS("/mnt/gapp/work/bohan/thesis/IFS_sperm_longRNA/MGI_gxdrnaseq_TPMmatrix.rds")
+brainOrTestis <- "brain|testis|hippo|cereb|cephalon|nucleus|bulb|thalamus|cortex|gyrus|corpus"
+brainOrTestisMax <- rowMaxs(mgi[,grep(brainOrTestis, colnames(mgi))])
+otherMax <- rowMaxs(mgi[,grep(paste0(brainOrTestis,"|spinal"), colnames(mgi), invert=TRUE)])
+lfc <- log2((0.1+brainOrTestisMax)/(0.1+otherMax))
+brainOrTestisSpecific <- otherMax<1 & brainOrTestisMax>1 & lfc>=1
+intersect(rownames(semisig), names(brainOrTestisSpecific)[brainOrTestisSpecific])
+```
+
+
+# 5. circRNA - no SVA
+
+```{r}
+circRNA_bsj <- read.csv("/mnt/gapp/work/bohan/thesis/IFS_sperm_longRNA/prep_CIRIquant_output/circRNA_bsj.csv")
+circRNA_info <- read.csv("/mnt/gapp/work/bohan/thesis/IFS_sperm_longRNA/prep_CIRIquant_output/circRNA_info.csv")
+rownames(circRNA_bsj) <- circRNA_bsj$circ_id
+rownames(circRNA_info) <- circRNA_info$circ_id
+# circRNA_bsj$gene_name <- circRNA_info[rownames(circRNA_bsj),]$gene_name
+
+circ_counts <- circRNA_bsj[, -1]
+se <- SummarizedExperiment(
+  assays = list(counts = circ_counts),
+  colData = data.frame(sampleid = colnames(circ_counts), 
+                 stress = ifelse(substr(colnames(circ_counts), 1, 1)=="C", "ctrl", "ifs"),
+                 protac = ifelse(substr(colnames(circ_counts), nchar(colnames(circ_counts)), nchar(colnames(circ_counts)))=="D", "DMSO", "PROTAC"))
+)
+se$group <- factor(paste0(se$stress, "_", se$protac))
+
+# add the host gene info to se
+rowData(se)$host_gene <- circRNA_info[rownames(se),]$gene_name
+rowData(se)$circ_type <- circRNA_info[rownames(se),]$circ_type
+rowData(se)$gene_type <- circRNA_info[rownames(se),]$gene_type
+rowData(se)$strand <- circRNA_info[rownames(se),]$strand
+
+
+dge_for_filter <- DGEList(assay(se, "counts"))
+dge_for_filter <- calcNormFactors(dge_for_filter)
+design_for_filter <- model.matrix(~ 0 + group, data = as.data.frame(colData(se)))
+keep <- filterByExpr(dge_for_filter, min.count = 5, design = design_for_filter)  # only use min.count=5 because circRNA has low reads.
+
+se <- se[keep, ] # 4858 circRNAs kept
+
+# voom
+dge <- DGEList(assay(se, "counts"))
+dge <- calcNormFactors(dge)
+design<- model.matrix(~ 0 + group, data = as.data.frame(colData(se)))
+assay(se, "logcpm") <- log1p(edgeR::cpm(dge)[rownames(se),])
+
+# add donor info
+colData(se)$donor <- sub("^(C[0-9]+|I[0-9]+)[DK]$", "\\1", colData(se)$sampleid)
+colData(se)$donor <- factor(colData(se)$donor)
+
+# ── 2. First voom + first duplicateCorrelation pass ───────────────────────────
+vobj_for_dupcor <- voom(dge, design, plot = FALSE)
+dupcor <- duplicateCorrelation(vobj_for_dupcor, design, block = colData(se)$donor)
+
+# ── 3. Second voom pass, now informed by the donor correlation ─────────────────
+vobj <- voom(dge, design, plot = FALSE,
+             block       = colData(se)$donor,
+             correlation = dupcor$consensus)
+
+# ── 4. Second duplicateCorrelation pass on the better voom weights ─────────────
+dupcor <- duplicateCorrelation(vobj, design, block = colData(se)$donor)
+
+# ── 5. Fit the linear model ────────────────────────────────────────────────────
+fit <- lmFit(vobj, design, block=colData(se)$donor, correlation = dupcor$consensus)
+
+contrast <- makeContrasts(
+  total_stress_vs_ctrl  = (groupifs_DMSO + groupifs_PROTAC)/2 - (groupctrl_DMSO + groupctrl_PROTAC)/2,
+  DMSO_stress_vs_ctrl   = groupifs_DMSO - groupctrl_DMSO,
+  PROTAC_stress_vs_ctrl = groupifs_PROTAC - groupctrl_PROTAC,
+  total_PROTAC_vs_DMSO  = (groupifs_PROTAC + groupctrl_PROTAC)/2 - (groupifs_DMSO + groupctrl_DMSO)/2,
+  ctrl_PROTAC_vs_DMSO   = groupctrl_PROTAC - groupctrl_DMSO,
+  stress_PROTAC_vs_DMSO = groupifs_PROTAC - groupifs_DMSO,
+  interaction           = (groupifs_PROTAC - groupctrl_PROTAC) - (groupifs_DMSO - groupctrl_DMSO),
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2)  # Empirical Bayes smoothing of standard errors
+
+
+# extract each contrast table 
+rowData(se)$DEA.voom.total_stress_vs_ctrl <- topTable(fit2, coef = "total_stress_vs_ctrl", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.DMSO_stress_vs_ctrl <- topTable(fit2, coef = "DMSO_stress_vs_ctrl", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.PROTAC_stress_vs_ctrl <- topTable(fit2, coef = "PROTAC_stress_vs_ctrl", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.total_PROTAC_vs_DMSO <- topTable(fit2, coef = "total_PROTAC_vs_DMSO", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.ctrl_PROTAC_vs_DMSO <- topTable(fit2, coef = "ctrl_PROTAC_vs_DMSO", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.stress_PROTAC_vs_DMSO <- topTable(fit2, coef = "stress_PROTAC_vs_DMSO", n = Inf)[rownames(se),]
+rowData(se)$DEA.voom.interaction <- topTable(fit2, coef = "interaction", n = Inf)
+
+```
+
+## Fig 14a
+
+volcano plot of circRNA DEA results 
+
+```{r}
+res <- rowData(se)$DEA.voom.total_stress_vs_ctrl
+res$host_gene <- rowData(se)[rownames(res),]$host_gene
+res <- res[order(res$P.Value),]
+res$sig_anno <- "non"
+res$sig_anno[which(res$adj.P.Val < 0.05 & res$logFC > 0)] <- "up" # no ups
+res$sig_anno[which(res$adj.P.Val < 0.05 & res$logFC< 0)] <- "down"  # no downs
+tasp1_label <- head(res[which(res$host_gene == "Tasp1"), ], 1)
+
+fig14a <- ggplot(res, aes(x = logFC, y = -log10(P.Value), label = host_gene, color = sig_anno)) + 
+  geom_point()+
+  geom_text_repel(
+    data = tasp1_label,
+    size = 8,
+    color = "black",
+    max.overlaps  = 20,
+    box.padding   = 0.3
+    ) +
+  geom_point(data = tasp1_label, color = "black", inherit.aes = FALSE,aes(x = logFC, y = -log10(P.Value)))+
+  scale_color_manual(name = "direction", values = c("up" = "red", "non" = "gray", "down" = "blue")) +
+  labs(
+    title  = "Sperm circRNA (total stress vs. ctrl)",
+    x      = "logFC stress vs. ctrl",
+    y      = "-log10(P.unadj)"
+  ) +
+  theme_bw()+
+  theme(
+    axis.title = element_text(size = 18),
+    plot.title = element_text(hjust=0.5),
+    axis.text  = element_text(size = 18),
+    title  = element_text(size = 18, face = "bold"),
+    legend.position = "none"
+  )
+fig14a
+
+# ggsave("/mnt/gapp/work/bohan/thesis/IFS_sperm_longRNA/plot_for_thesis/volcano_circ_voom_total_stress_vs_ctrl.pdf", fig14a, width = 7, height = 7)
+```
+
+## Fig 14b 
+
+Tasp1 circRNA
+
+```{r}
+# logcpm
+tasp1 <- assay(se, "logcpm")[which(rownames(se)=="chr2:139884014|139899419"),]
+df_tasp1 <- data.frame(
+  sample = names(tasp1),
+  stress = ifelse(substr(names(tasp1), 1, 1)=="C", "ctrl", "stress"),
+  PROTAC = ifelse(substr(names(tasp1), nchar(names(tasp1)), nchar(names(tasp1)))=="D", "DMSO", "PROTAC"),
+  donor = gsub("[DK]$", "", names(tasp1)),
+  count = tasp1
+)
+df_tasp1$group <- factor(paste0(df_tasp1$stress, "_", df_tasp1$PROTAC))
+
+
+fig14b <- ggplot(data = df_tasp1, aes(x = group, y = count)) + 
+  geom_boxplot(outlier.shape = NA, alpha = 0.7)+
+  geom_point(size = 2, alpha = 0.8) +
+  geom_line(aes(group = donor), color = "grey10", alpha = 0.5, linewidth = 1.5)+
+  theme_bw() +
+  labs(x = "Group", y = "logcpm",  title = "Expression of Tasp1-circRNA") +
+  theme(
+    # axis titles
+    axis.title.x  = element_blank(),
+    axis.title.y  = element_text(size = 18, face = "bold"),
+    title  = element_text(size = 18, face = "bold"),
+    plot.title = element_text(hjust=0.5),
+    # axis text
+    axis.text.x   = element_text(size = 18, face = "bold", vjust = 0.1),
+    axis.text.y   = element_text(size = 14),
+    # axis ticks
+    axis.ticks    = element_line(size = 0),
+    axis.ticks.length = unit(0, "cm"),
+    legend.text = element_text(size = 18)
+    )
+fig14b
+# ggsave("./plot_for_thesis/box_tasp1_logcpm.pdf", fig14b, width = 7, height = 7)
+```
+
