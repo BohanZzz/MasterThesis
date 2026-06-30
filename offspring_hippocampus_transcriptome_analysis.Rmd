@@ -1,0 +1,606 @@
+---
+title: "FINAL offspring hippo"
+output: html_document
+author: "Bohan Zhang"
+date: "2026-06-03"
+---
+
+```{r setup}
+library(edgeR)
+library(SummarizedExperiment)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(fgsea)
+library(msigdbr)
+library(ggplot2)
+library(limma)
+library(ComplexHeatmap)
+library(sechm)
+library(viper)
+library(decoupleR)
+library(tidyr)
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+library(magick)
+library(cluster)
+library(ggsignif)
+library(ggplotify)
+library(circlize)
+setwd("/mnt/gapp/work/bohan/thesis/IFS_IVF_offspring_hippo_bulkRNA")
+```
+
+# 1. DEA with 2 SVs
+```{r}
+se <- readRDS("2026_iryna_EXP04_bulkRNAhippo_IFS_IVF_offspring.SE.rds")
+group <- factor(se$group)
+set.seed(123)
+se <- SEtools::svacor(se, ~group, n.sv = 2) 
+se <- se[,order(se$stress, se$protac, se$sex)]
+metadata(se)$anno_colors <- list(stress = c(stress = "red3", ctrl ="#56B4E9"), 
+                                 protac = c(PROTAC = "orange2", DMSO = "navy"),
+                                 sex = c(f = "blueviolet", m = "darkgreen"))
+saveRDS(se, "2026_iryna_EXP04_bulkRNAhippo_IFS_IVF_offspring.SE_SV2.rds")
+se <- readRDS("2026_iryna_EXP04_bulkRNAhippo_IFS_IVF_offspring.SE_SV2.rds")
+group <- factor(se$group)
+```
+
+## design matrix
+
+```{r}
+design <- model.matrix(~ 0 + group + se$SV1 + se$SV2)  
+colnames(design) <- c(levels(group), "SV1", "SV2")
+rownames(design) <- se$sampleid
+print(design)
+
+contrast <- limma::makeContrasts(
+  # Both Sexes
+  total_stress_vs_ctrl          = (stress_DMSO_m + stress_DMSO_f + stress_PROTAC_m + stress_PROTAC_f) / 4 - (ctrl_DMSO_m + ctrl_DMSO_f + ctrl_PROTAC_m + ctrl_PROTAC_f) / 4,
+  total_PROTAC_vs_DMSO          = (stress_PROTAC_m + stress_PROTAC_f + ctrl_PROTAC_m + ctrl_PROTAC_f) / 4 - (stress_DMSO_m + stress_DMSO_f + ctrl_DMSO_m + ctrl_DMSO_f) / 4,
+  bothsex_DMSO_stress_vs_ctrl   = (stress_DMSO_m + stress_DMSO_f)/2 - (ctrl_DMSO_m + ctrl_DMSO_f)/2, 
+  bothsex_PROTAC_stress_vs_ctrl = (stress_PROTAC_m + stress_PROTAC_f)/2 - (ctrl_PROTAC_m + ctrl_PROTAC_f)/2,
+  bothsex_ctrl_PROTAC_vs_DMSO   = (ctrl_PROTAC_m + ctrl_PROTAC_f)/2 - (ctrl_DMSO_m + ctrl_DMSO_f)/2,
+  bothsex_stress_PROTAC_vs_DMSO = (stress_PROTAC_m + stress_PROTAC_f)/2 - (stress_DMSO_m + stress_DMSO_f)/2,
+  bothsex_interaction_between_stress_n_PROTAC   = ((stress_PROTAC_m + stress_PROTAC_f)/2 - (ctrl_PROTAC_m + ctrl_PROTAC_f)/2) - ((stress_DMSO_m + stress_DMSO_f)/2 - (ctrl_DMSO_m + ctrl_DMSO_f)/2),
+  
+  # male only
+  m_total_stress_vs_ctrl        = (stress_DMSO_m + stress_PROTAC_m) / 2 - (ctrl_DMSO_m + ctrl_PROTAC_m) / 2,
+  m_total_PROTAC_vs_DMSO        = (stress_PROTAC_m + ctrl_PROTAC_m) / 2 - (stress_DMSO_m + ctrl_DMSO_m) / 2,
+  m_DMSO_stress_vs_ctrl         = stress_DMSO_m - ctrl_DMSO_m, 
+  m_PROTAC_stress_vs_ctrl       = stress_PROTAC_m - ctrl_PROTAC_m,
+  m_ctrl_PROTAC_vs_DMSO         = ctrl_PROTAC_m - ctrl_DMSO_m,
+  m_stress_PROTAC_vs_DMSO       = stress_PROTAC_m - stress_DMSO_m,
+  m_interaction_between_stress_n_PROTAC   = (stress_PROTAC_m - ctrl_PROTAC_m) - (stress_DMSO_m - ctrl_DMSO_m ),
+  
+  # female only
+  f_total_stress_vs_ctrl        = (stress_DMSO_f + stress_PROTAC_f) / 2 - (ctrl_DMSO_f + ctrl_PROTAC_f) / 2,
+  f_total_PROTAC_vs_DMSO        = (stress_PROTAC_f + ctrl_PROTAC_f) / 2 - (stress_DMSO_f + ctrl_DMSO_f) / 2,
+  f_DMSO_stress_vs_ctrl         = stress_DMSO_f - ctrl_DMSO_f, 
+  f_PROTAC_stress_vs_ctrl       = stress_PROTAC_f - ctrl_PROTAC_f,
+  f_ctrl_PROTAC_vs_DMSO         = ctrl_PROTAC_f - ctrl_DMSO_f,
+  f_stress_PROTAC_vs_DMSO       = stress_PROTAC_f - stress_DMSO_f,
+  f_interaction_between_stress_n_PROTAC   = (stress_PROTAC_f - ctrl_PROTAC_f) - (stress_DMSO_f - ctrl_DMSO_f ),  
+  
+  # No matter PROTAC or DMSO:
+  total_m_vs_f                 = (stress_DMSO_m + stress_PROTAC_m + ctrl_DMSO_m + ctrl_PROTAC_m) / 4 - (stress_DMSO_f + stress_PROTAC_f + ctrl_DMSO_f + ctrl_PROTAC_f) / 4,
+  bothdrug_ctrl_m_vs_f         = (ctrl_DMSO_m + ctrl_PROTAC_m) /2 - (ctrl_DMSO_f + ctrl_PROTAC_f) / 2,
+  bothdrug_stress_m_vs_f       = (stress_DMSO_m + stress_PROTAC_m)/2 - (stress_DMSO_f + stress_PROTAC_f) /2,
+  bothdrug_interaction_between_sex_n_stress = ((stress_DMSO_m + stress_PROTAC_m)/2 - (ctrl_DMSO_m + ctrl_PROTAC_m)/2) - ((stress_DMSO_f + stress_PROTAC_f)/2 - (ctrl_DMSO_f + ctrl_PROTAC_f)/2),
+  
+  # DMSO only:
+  DMSO_total_m_vs_f            = (stress_DMSO_m + ctrl_DMSO_m) / 2 - (stress_DMSO_f + ctrl_DMSO_f) / 2,
+  DMSO_ctrl_m_vs_f             = ctrl_DMSO_m - ctrl_DMSO_f,
+  DMSO_stress_m_vs_f           = stress_DMSO_m - stress_DMSO_f,
+  DMSO_interaction_between_sex_n_stress = (stress_DMSO_m - ctrl_DMSO_m) - (stress_DMSO_f - ctrl_DMSO_f),
+  
+  # PROTAC only
+  PROTAC_total_m_vs_f            = (stress_PROTAC_m + ctrl_PROTAC_m) / 2 - (stress_PROTAC_f + ctrl_PROTAC_f) / 2,
+  PROTAC_ctrl_m_vs_f             = ctrl_PROTAC_m - ctrl_PROTAC_f,
+  PROTAC_stress_m_vs_f           = stress_PROTAC_m - stress_PROTAC_f,
+  PROTAC_interaction_between_sex_n_stress = (stress_PROTAC_m - ctrl_PROTAC_m) - (stress_PROTAC_f - ctrl_PROTAC_f),
+  
+  # No matter stress or ctrl:
+  bothstress_interaction_between_sex_n_PROTAC = ((stress_PROTAC_m + ctrl_PROTAC_m)/2 - (stress_DMSO_m + ctrl_DMSO_m)/2) - ((stress_PROTAC_f + ctrl_PROTAC_f)/2 - (stress_DMSO_f + ctrl_DMSO_f)/2),
+  
+  # stress only
+  stress_interaction_between_sex_n_PROTAC = (stress_PROTAC_m  - stress_DMSO_m) - (stress_PROTAC_f - stress_DMSO_f),
+  
+  # ctrl only
+  ctrl_interaction_between_sex_n_PROTAC = (ctrl_PROTAC_m  - ctrl_DMSO_m) - (ctrl_PROTAC_f - ctrl_DMSO_f),
+  
+  levels = design)
+
+as.data.frame(contrast)
+```
+
+## counts filtering
+
+```{r}
+dge <- DGEList(assay(se, "counts"))
+dge <- calcNormFactors(dge)
+
+head(dge)
+keep <- filterByExpr(dge$counts, min.count = 20, design = design)  # keep 14975 genes
+dge$counts <- dge$counts[keep, ]
+se <- se[keep, ]
+
+assay(se, "logcpm") <- log1p(edgeR::cpm(dge)[rownames(se),]) # for visualization
+se
+
+# calculate scaled logcpm for viper
+assay(se, "scaled_logcpm") <- t(scale(t(assays(se)$logcpm))) # for each gene, scale across samples
+```
+
+## edgeR
+
+### All
+
+```{r}
+y <- estimateDisp(dge, design)
+fit <- glmFit(y, design)
+lrt <- glmLRT(fit, contrast = contrast)
+results <- as.data.frame(topTags(lrt, n = Inf))
+
+getDEA <- function(fit, cont_M, cont_group, se){
+  lrt <- glmLRT(fit, contrast = cont_M[,cont_group])
+  results <- as.data.frame(topTags(lrt, n = Inf))
+  name <- paste0("DEA.", cont_group)
+  rowData(se)[[name]] <- results[row.names(se),]
+  return(se)
+}
+
+# run the DEA for each contrast group
+se <- Reduce(function(curr_se, nm) getDEA(fit, contrast, nm, curr_se),
+             colnames(contrast),
+             init = se)
+rowData(se)[["DEA.overall"]] <- results[rownames(se),]  # put in the overall results
+se
+
+saveRDS(se, "se_svnum2_with_DEA_result.rds")
+```
+
+# Figure
+
+```{r}
+se <- readRDS("se_svnum2_with_DEA_result.rds")
+# for p4a and p4c: dont show legend
+col_annotation_1 <- HeatmapAnnotation(
+    stress = colData(se)$stress,
+    protac = colData(se)$protac,
+    sex = colData(se)$sex,
+    col = metadata(se)$anno_colors,
+    show_legend = FALSE,
+    annotation_name_gp = gpar(fontsize = 18, fontface = "bold")
+)
+
+# for p4b: show legend
+col_annotation_2 <- HeatmapAnnotation(
+    stress = colData(se)$stress,
+    protac = colData(se)$protac,
+    sex = colData(se)$sex,
+    col = metadata(se)$anno_colors,
+    annotation_name_gp = gpar(fontsize = 18, fontface = "bold")
+)
+```
+
+## Fig 4
+
+Heatmap: DEGs with stress and sex interaction
+
+```{r}
+results_DMSO_interaction_between_sex_n_stress <- rowData(se)$DEA.DMSO_interaction_between_sex_n_stress
+table(results_DMSO_interaction_between_sex_n_stress$FDR < 0.05)
+sig_DMSO_interaction_between_sex_n_stress <- results_DMSO_interaction_between_sex_n_stress[results_DMSO_interaction_between_sex_n_stress$FDR < 0.05,]
+sig_DMSO_interaction_between_sex_n_stress
+
+
+# pdf("fig4.pdf", width = 8, height = 8)
+p4a <- sechm(se, 
+      rownames(sig_DMSO_interaction_between_sex_n_stress), 
+      assayName = "corrected",
+      top_annotation = col_annotation_2,
+      column_title = "DEGs with stress and sex interaction",
+      column_title_gp = gpar(fontsize = 24, fontface = "bold"),
+      heatmap_legend_param = list(
+        title_gp = gpar(fontsize = 18),   # legend title
+        labels_gp = gpar(fontsize = 18)                      # legend numbers/text
+      ),
+      gaps_at = c("protac", "sex"),
+      cluster_rows = TRUE,
+      do.scale = TRUE, 
+      use_raster=TRUE)
+# draw(p4a)
+# dev.off()
+p4a <- as.ggplot(p4a) 
+```
+
+## Fig 5A
+
+Heatmap: male_DMSO, stress effect
+
+```{r}
+results_m_DMSO_stress_vs_ctrl <- rowData(se)$DEA.m_DMSO_stress_vs_ctrl
+table(results_m_DMSO_stress_vs_ctrl$FDR < 0.05)
+sig_m_DMSO_stress_vs_ctrl <- results_m_DMSO_stress_vs_ctrl[results_m_DMSO_stress_vs_ctrl$FDR < 0.05,]
+sig_m_DMSO_stress_vs_ctrl
+table(sig_m_DMSO_stress_vs_ctrl$logFC<0)
+# FALSE  TRUE 
+#   125   160 
+
+# pdf("fig5a.pdf", width = 8, height = 8)
+p5a <- sechm(se, 
+      rownames(sig_m_DMSO_stress_vs_ctrl), 
+      assayName = "corrected",
+      column_title = "Stress-regulated DEGs\nin male DMSO samples",
+      column_title_gp = gpar(fontsize = 24, fontface = "bold"),
+      top_annotation = col_annotation_1,
+      gaps_at = c("protac", "sex"),
+      heatmap_legend_param = list(
+        title_gp = gpar(fontsize = 18),   # legend title
+        labels_gp = gpar(fontsize = 18)                      # legend numbers/text
+      ),
+      cluster_rows = TRUE,
+      do.scale = TRUE,
+      use_raster=TRUE)
+# draw(p5a)
+# dev.off()
+p5a <- as.ggplot(p5a)
+```
+
+## Fig 5B
+
+Heatmap: female_DMSO, stress effect
+
+```{r}
+results_f_DMSO_stress_vs_ctrl <- rowData(se)$DEA.f_DMSO_stress_vs_ctrl
+table(results_f_DMSO_stress_vs_ctrl$FDR < 0.05)
+sig_f_DMSO_stress_vs_ctrl <- results_f_DMSO_stress_vs_ctrl[results_f_DMSO_stress_vs_ctrl$FDR < 0.05,]
+sig_f_DMSO_stress_vs_ctrl
+
+# pdf("fig5b.pdf", width = 8, height = 8)
+p5b <- sechm(se, 
+      rownames(results_f_DMSO_stress_vs_ctrl[order(results_f_DMSO_stress_vs_ctrl$PValue),])[1:100], 
+      assayName = "corrected",
+      top_annotation = col_annotation_2,
+      column_title = "Stress-regulated top100 genes\nin female DMSO samples",
+      column_title_gp = gpar(fontsize = 24, fontface = "bold"),
+      gaps_at = c("protac", "sex"),
+      heatmap_legend_param = list(
+        title_gp = gpar(fontsize = 18),   # legend title
+        labels_gp = gpar(fontsize = 18)                      # legend numbers/text
+      ),
+      cluster_rows = TRUE,
+      do.scale = TRUE,
+      use_raster=TRUE)
+# draw(p5b)
+# dev.off()
+p5b <- as.ggplot(p5b)
+
+```
+
+two candidate genes
+
+```{r}
+df_for_single_gene <- as.data.frame(cbind(t(assay(se, "logcpm")), colData(se)))
+df_for_single_gene$stress <- factor(df_for_single_gene$stress, levels = c("ctrl", "stress"))
+df_for_single_gene$protac <- factor(df_for_single_gene$protac, levels = c("DMSO", "PROTAC"))
+df_for_single_gene$sex <- factor(df_for_single_gene$sex, levels = c("m", "f"))
+df_for_single_gene$group <- factor(df_for_single_gene$group, 
+                                   levels = c("ctrl_DMSO_m", "stress_DMSO_m", "ctrl_PROTAC_m", "stress_PROTAC_m", 
+                                              "ctrl_DMSO_f", "stress_DMSO_f", "ctrl_PROTAC_f", "stress_PROTAC_f"))
+```
+
+## Fig 5C
+
+Il4ra
+
+```{r Il4ra}
+table(colnames(df_for_single_gene)=="Il4ra")
+p5c <- ggplot(df_for_single_gene, aes(x = group, y = Il4ra))+
+  geom_boxplot(size = 1.2)+
+  geom_point(aes(fill = sex), shape = 21, size = 5, color = "black")+
+  # geom_jitter(aes(x = Condition, y = Ogg1, fill = Period))+
+  scale_fill_manual(values = c("m" = "green4","f" = "blueviolet"))+
+  labs(x = "", y = "LogCPM",
+         title = "Il4ra expression")+
+  scale_y_continuous(limits = c(1.2,1.9), breaks = seq(1.2,1.9, by = 0.2))+
+  theme_classic()+
+  geom_signif(
+  comparisons = list(c("ctrl_DMSO_m", "stress_DMSO_m"), c("ctrl_DMSO_f", "stress_DMSO_f")),
+  annotations = c("FDR = 0.038", "FDR = 0.022"),
+  map_signif_level = FALSE,
+  step_increase = 0.1,
+  tip_length = 0.01,
+  size = 0.8,
+  textsize = 6,
+  fontface = "bold",
+  y_position = 1.74    # adjust to sit above your data
+)+
+  theme(
+    # axis titles
+    axis.title.x  = element_blank(),
+    axis.title.y  = element_text(size = 18, face = "bold"),
+    title  = element_text(size = 24, face = "bold"),
+    plot.title = element_text(hjust = 0.5),
+    # axis text
+    axis.text.x   = element_blank(),
+    axis.text.y   = element_text(size = 18, face = "bold"),
+    # axis lines
+    axis.line     = element_line(size = 1.4),
+    # axis ticks
+    axis.ticks    = element_line(size = 0),
+    axis.ticks.length = unit(0, "cm"),
+    legend.text = element_text(size = 18))
+p5c
+```
+
+## Fig 5D
+
+Agt
+
+```{r Agt}
+table(colnames(df_for_single_gene)=="Agt")
+p5d <- ggplot(df_for_single_gene, aes(x = group, y = Agt))+
+  geom_boxplot(size = 1.2)+
+  geom_point(aes(fill = sex), shape = 21, size = 5, color = "black")+
+  # geom_jitter(aes(x = Condition, y = Ogg1, fill = Period))+
+  scale_fill_manual(values = c("m" = "green4","f" = "blueviolet"))+
+  labs(x = "", y = "LogCPM",
+         title = "Agt expression")+
+  scale_y_continuous(limits = c(2.5, 3.6), breaks = seq(2.5, 3.6, by = 0.2))+
+  theme_classic()+
+  geom_signif(
+  comparisons = list(c("ctrl_DMSO_m", "stress_DMSO_m"), c("ctrl_DMSO_f", "stress_DMSO_f")),
+  annotations = c("FDR = 0.027", "FDR = 0.006"),
+  map_signif_level = FALSE,
+  step_increase = 0.12,
+  tip_length = 0.01,
+  size = 0.8,
+  textsize = 6,
+  fontface = "bold",
+  y_position = 3.35    # adjust to sit above your data
+)+
+  theme(
+    # axis titles
+    axis.title.x  = element_blank(),
+    axis.title.y  = element_text(size = 18, face = "bold"),
+    title  = element_text(size = 24, face = "bold"),
+    plot.title = element_text(hjust = 0.5),
+    # axis text
+    axis.text.x   = element_blank(),
+    axis.text.y   = element_text(size = 18, face = "bold"),
+    # axis lines
+    axis.line     = element_line(size = 1.4),
+    # axis ticks
+    axis.ticks    = element_line(size = 0),
+    axis.ticks.length = unit(0, "cm"),
+    legend.text = element_text(size = 18))
+p5d
+```
+
+## Fig5-combine
+
+```{r}
+tag_theme <- theme(plot.tag = element_text(face = "bold", size = 24),
+                   plot.tag.position = "topleft")
+fig5 <- (((p5a+labs(tag="A") + tag_theme  | p5b+labs(tag="B") + tag_theme )+plot_layout(widths = c(1, 1.1))) / ((p_Il4ra + labs(tag="C") + tag_theme ) | (p_Agt + labs(tag = "D") + tag_theme ))) + 
+    plot_layout(heights = c(1.5, 1))
+
+# ggsave("fig5.pdf", fig5, width = 15, height = 15)
+```
+
+## Fig 6
+
+FGSEA results
+
+```{r}
+get_top_table <- function(pattern = NULL, filelist, top_num){ 
+    # the pattern should be the the pattern of the pathway names that we want to extract
+    # for example "C5:GP:BP"
+    # top_num: how many top terms we extract from each contrast
+    if (is.null(pattern)){
+        top_list <- map_dfr(filelist, function(fpath) {
+        df <- readRDS(fpath)
+        df <- df[order(df$pval), ]
+        df_top <- head(df, top_num)  # now choose top5 otherwise too many terms
+        fname <- basename(fpath)
+        label <- gsub("^fgsea_", "", fname)
+        df_top %>%
+            mutate(source_file = fname,
+                source = label,
+                .before = 1)  # put source in column1
+    })
+    }
+    else {
+        top_list <- map_dfr(filelist, function(fpath) {
+        df <- readRDS(fpath)
+        df <- df[order(df$pval), ]
+        df_top <- head(df[grepl(pattern, df$pathway),], top_num)  # extract the terms
+        fname <- basename(fpath)
+        label <- gsub("^fgsea_", "", fname)
+        df_top %>%
+            mutate(source_file = fname,
+                source = label,
+                .before = 1)  # put source at column1
+})
+    }
+
+    top_path <- unique(top_list$pathway)
+    fgsea_combine <- map_dfr(filelist, function(f){
+        df <- readRDS(f)
+        matched <- df %>% filter(pathway %in% top_path)
+        matched %>%
+            mutate(
+                label = gsub("^fgsea_", "", basename(f)),
+                .before = 1)
+    })
+
+    fgsea_combine$label <- gsub("\\.rds$", "", fgsea_combine$label)
+    
+    return(fgsea_combine)
+}
+
+get_cluster <- function(maxK, fgsea_table){ # the function will decide the cluster number by itself (silhouette)
+    # First: create a pathway x label matrix, the values are NES (we do the cluster based on NES)
+    mat_df <- fgsea_table %>%
+        dplyr::select(label, pathway, NES) %>%   
+        pivot_wider(names_from = label, values_from = NES)
+    mat <- as.matrix(mat_df %>% select(-pathway))
+    rownames(mat) <- mat_df$pathway
+
+    # Second: compute the distance
+    # Pearson correlation distance (1 - correlation): measures similarity in patterns, ignoring magnitude
+    # Euclidean distance: measures absolute numeric differneces (magnitude)
+    # here we care about the pattern across contrast groups, so we use the pearson correlation
+    dist_mat <- as.dist(1 - cor(t(mat)))
+
+    # Third: compute hierarchical clustering
+    hc <- hclust(dist_mat, method = "ward.D2")  # ward.D2: join clusters that cause the smallest increase in within-cluster variance. good for forming compact balanced clusters from continuous data 
+
+    # Fouth: use silhouette to check how many clusters are the best
+    avg_sil <- numeric(maxK) 
+    for(k in 3:maxK){  
+        cl <- cutree(hc, k= k)
+        sil <- silhouette(cl, dist_mat)
+        avg_sil[k] <- mean(sil[,3])
+    }
+    best_k_sil <- which.max(avg_sil)
+
+    plot(3:maxK, avg_sil[3:maxK], type="b", xlab="k", ylab="Average silhouette", pch=19)
+    cat("Best k by silhouette =", best_k_sil, ", avg silhouette =", avg_sil[best_k_sil], "\n")
+
+    pathway_order <- hc$labels[hc$order]
+    clusters <- cutree(hc, k = best_k_sil)
+    cluster_df <- tibble(pathway = names(clusters), cluster = as.factor(clusters))
+
+    # Put the cluster result into the original table
+    fgsea_clustered <- fgsea_table %>%
+        left_join(cluster_df, by = "pathway") %>%
+        mutate(pathway = factor(pathway, levels = pathway_order))
+
+    return(fgsea_clustered)
+}
+```
+
+```{r}
+dir_path <- "fgsea"
+files <- list.files(path = dir_path, pattern = "^fgsea_.*", full.names = TRUE)
+pattern = c("fgsea_total_stress_vs_ctrl", "total_PROTAC_vs_DMSO", "DMSO_interaction_between_sex_n_stress", "PROTAC_interaction_between_sex_n_stress")
+files <- files[grepl(paste(pattern, collapse = "|"), files)]
+
+fgsea_combine_GOBP <- get_top_table(pattern = "C5:GO:BP", filelist = files, top_num = 10)
+fgsea_combine_GOBP$label <- factor(fgsea_combine_GOBP$label, levels = c(
+        "total_stress_vs_ctrl", "total_PROTAC_vs_DMSO", "DMSO_interaction_between_sex_n_stress", "PROTAC_interaction_between_sex_n_stress"
+    ))
+
+set.seed(123)
+fgsea_combine_GOBP_clustered <- get_cluster(maxK = 5, fgsea_table = fgsea_combine_GOBP)
+cluster_bar_combine_GOBP_clustered <- fgsea_combine_GOBP_clustered %>% distinct(pathway, cluster)
+
+
+fgsea_combine_GOBP_clustered$pathway <- gsub(pattern = "C5:GO:BP:GOBP_",replacement = "",x =fgsea_combine_GOBP_clustered$pathway )
+cluster_bar_combine_GOBP_clustered$pathway<- gsub(pattern = "C5:GO:BP:GOBP_",replacement = "",x =cluster_bar_combine_GOBP_clustered$pathway)
+
+fgsea_combine_GOBP_clustered$label <- factor(
+  fgsea_combine_GOBP_clustered$label,
+  levels = c("total_stress_vs_ctrl", "total_PROTAC_vs_DMSO", "DMSO_interaction_between_sex_n_stress", "PROTAC_interaction_between_sex_n_stress"),
+  labels= c("Stress vs Ctrl","PROTAC vs DMSO","Interaction Stress:Sex (DMSO)","Interaction Stress:Sex (PROTAC)")
+)
+```
+
+```{r,fig.width=20}
+fig6 <- ggplot(fgsea_combine_GOBP_clustered, aes(x = label, y = pathway, color = NES, size = -log10(padj), shape = padj<0.05)) +
+    geom_point() +
+    theme_minimal() +
+    scale_color_gradient2(low = "blue", high = "red", mid="grey") +
+    scale_size_continuous(range = c(2, 8)) +
+    theme(
+        axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1, size = 16),
+        axis.text.y = element_text(size = 20),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.title = element_text(size = 24, face = "bold"),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 18)
+    ) +
+    labs(title = "GSEA of GO:BP in offspring hippocampus\ntranscriptome comparisons")+
+    xlab(NULL)+
+    # label the clusters
+    geom_text(data = fgsea_combine_GOBP_clustered %>% dplyr::filter(!duplicated(pathway)),
+        aes(x = -Inf, y = pathway, label = cluster),
+        inherit.aes = FALSE, hjust = -0.1, size = 3) +
+    coord_cartesian(clip = "off") +
+    facet_grid(cluster ~ ., scales = "free_y", space = "free_y") +  # to make a little gap between clusters
+    geom_tile(data = cluster_bar_combine_GOBP_clustered,  #REMEMBER TO CHANGE
+            aes(x = -0.5, y = pathway, fill = cluster),
+            width = 0.3, height = 0.8,
+            inherit.aes = FALSE)+
+  scale_fill_brewer(palette = "Dark2")
+
+fig6
+# ggsave("./plot_for_thesis/fig6.pdf", width = 15.5, height = 12)
+
+```
+
+## Fig 7
+
+Notch1
+
+```{r}
+v1 <- readRDS("TF_enrichment/se_viper_first_TFactivity_then_DEA.rds")
+
+# DMSO_interaction_between_sex_n_stress
+rowData(v1)$DEA.TF.DMSO_interaction_between_sex_n_stress[rowData(v1)$DEA.TF.DMSO_interaction_between_sex_n_stress$adj.P.Val < 0.05,]
+```
+
+           logFC      AveExpr        t      P.Value   adj.P.Val
+Notch1 -5.205099 -0.002139608 -4.96578 6.143959e-06 0.003624936
+              B
+Notch1 3.593475
+
+```{r}
+t <- v1
+t <- t[, t$protac=="DMSO"]
+t <- log2FC(t, fromAssay = "NES", controls = t$sex == "f", by = t$stress, isLog=TRUE)
+test <- data.frame(male = rowMeans(assay(t[,t$sex=="m"&t$stress=="stress"], "log2FC")),female = rowMeans(assay(t[,t$sex=="f"&t$stress=="stress"], "log2FC")))
+
+tg <- test["Notch1",]
+#           male female
+# Notch1 -1.5775 0.0025
+```
+
+```{r}
+df_for_single_tf <- as.data.frame(cbind(t(assay(t, "NES")), colData(t)))
+df_for_single_tf$group <- factor(df_for_single_tf$group, 
+                                 levels = c("ctrl_DMSO_m", "stress_DMSO_m", "ctrl_PROTAC_m", "stress_PROTAC_m", 
+                                              "ctrl_DMSO_f", "stress_DMSO_f", "ctrl_PROTAC_f", "stress_PROTAC_f"))
+table(colnames(df_for_single_tf)=="Notch1")
+p7 <- ggplot(df_for_single_tf, aes(x = group, y = Notch1))+
+  geom_boxplot(size = 1.2)+
+  geom_point(aes(fill = sex), shape = 21, size = 5, color = "black")+
+  # geom_jitter(aes(x = Condition, y = Ogg1, fill = Period))+
+  scale_fill_manual(values = c("m" = "green4","f" = "blueviolet"))+
+  labs(x = "", y = "LogCPM",
+         title = "Notch1 activity")+
+  theme_classic()+
+  theme(
+    # axis titles
+    axis.title.x  = element_blank(),
+    axis.title.y  = element_text(size = 18, face = "bold"),
+    title  = element_text(size = 24, face = "bold"),
+    # axis tick labels
+    axis.text.x   = element_blank(),
+    axis.text.y   = element_text(size = 18, face = "bold"),
+    plot.title = element_text(hjust = 0.5),
+    # axis lines
+    axis.line     = element_line(size = 1.4),
+    # axis ticks
+    axis.ticks    = element_line(size = 0),
+    axis.ticks.length = unit(0, "cm"),
+    legend.text = element_text(size = 18))
+p7
+# ggsave("./plot_for_thesis/Notch1_activity.pdf", p7)
+# ggsave("fig7.pdf", p7)
+
+```
+
